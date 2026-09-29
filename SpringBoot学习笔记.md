@@ -14,7 +14,7 @@
 - [x] Task 04：解决 IDEA 包创建问题
 - [x] Task 05：配置 Git 忽略规则
 - [x] Task 06：学习路径参数、查询参数和 JSON 响应
-- [ ] Task 07：项目分层——Controller、Service、Repository
+- [x] Task 07：项目分层——Controller、Service、Repository
 - [ ] Task 08：接入 MySQL 与 Spring Data JPA
 - [ ] Task 09：参数校验和统一异常处理
 - [ ] Task 10：编写自动化测试
@@ -1394,6 +1394,1056 @@ UserRepository.findById
 我对依赖注入的理解：
 
 为什么使用 Optional：
+```
+
+---
+
+# Task 08：接入 MySQL 与 Spring Data JPA
+
+## 1. 当前状态检查
+
+Task 07 已经完成，项目中存在：
+
+```text
+model/User.java
+respository/UserRepository.java
+service/UserService.java
+controller/UserController.java
+```
+
+当前 Repository 使用 Java `List` 保存数据。应用关闭后，数据不会真正持久化。
+
+本任务会把调用链从：
+
+```text
+Controller → Service → 内存 List
+```
+
+改成：
+
+```text
+Controller → Service → Spring Data JPA → Hibernate → JDBC → MySQL
+```
+
+## 2. 本任务目标
+
+完成后应当能够：
+
+1. 理解 JDBC、JPA、Hibernate 和 Spring Data JPA 的关系。
+2. 为项目添加 JPA 和 MySQL 驱动。
+3. 配置 Spring Boot 数据源。
+4. 把普通 Java 模型改成 JPA Entity。
+5. 使用 `JpaRepository` 完成基本 CRUD。
+6. 通过 POST 请求把数据保存到 MySQL。
+7. 重启应用后确认数据仍然存在。
+
+## 3. 先理解技术关系
+
+```text
+业务代码
+   ↓
+Spring Data JPA：提供 Repository 接口和常用 CRUD 方法
+   ↓
+JPA：定义对象关系映射规范
+   ↓
+Hibernate：Spring Boot 默认使用的 JPA 实现
+   ↓
+JDBC Driver：将 Java 数据库操作转换为 MySQL 协议
+   ↓
+MySQL
+```
+
+- JDBC 是 Java 连接关系型数据库的基础接口。
+- JPA 是对象与数据库表之间映射的规范。
+- Hibernate 实现 JPA。
+- Spring Data JPA 在 JPA 之上进一步减少 Repository 样板代码。
+
+Spring Boot 官方文档说明，`spring-boot-starter-data-jpa` 会提供 Hibernate、Spring Data JPA 和 Spring ORM。
+
+## 4. 阶段一：修正 repository 包名
+
+当前包名写成了：
+
+```text
+respository
+```
+
+正确拼写是：
+
+```text
+repository
+```
+
+虽然拼错后只要 import 一致，Java 仍然可以运行，但长期保留会降低可读性。
+
+### 使用 IDEA 重命名
+
+在 IDEA 中右键：
+
+```text
+com.Shuan.spring_boot_study.respository
+```
+
+选择：
+
+```text
+Refactor → Rename
+```
+
+改为：
+
+```text
+repository
+```
+
+使用 Refactor 而不是直接修改文件夹名称，因为 IDEA 会同时更新引用它的 import。
+
+完成后检查 `UserService.java`：
+
+```java
+import com.Shuan.spring_boot_study.repository.UserRepository;
+```
+
+## 5. 阶段二：确认 MySQL 环境
+
+在终端中执行：
+
+```bash
+mysql --version
+```
+
+如果能显示 MySQL 版本，继续检查服务和登录。
+
+尝试登录：
+
+```bash
+mysql -u root -p
+```
+
+命令会提示输入密码。终端输入密码时通常不会显示字符，这是正常的。
+
+如果出现：
+
+```text
+command not found: mysql
+```
+
+说明 MySQL 客户端没有安装，或者没有加入 PATH。可以使用 MySQL 官方 macOS 安装包安装 MySQL Community Server：
+
+```text
+https://dev.mysql.com/downloads/mysql/
+```
+
+安装时记录自己设置的 root 密码。不要把真实密码写进学习笔记或 Git。
+
+## 6. 阶段三：创建数据库和专用用户
+
+登录 MySQL：
+
+```bash
+mysql -u root -p
+```
+
+登录成功后，在 MySQL 提示符中执行：
+
+```sql
+CREATE DATABASE spring_boot_study
+    CHARACTER SET utf8mb4
+    COLLATE utf8mb4_0900_ai_ci;
+```
+
+创建应用专用账号。将示例密码替换成自己设置的本地密码：
+
+```sql
+CREATE USER 'spring_user'@'localhost'
+    IDENTIFIED BY '替换成你自己的密码';
+```
+
+授予这个账号访问学习数据库的权限：
+
+```sql
+GRANT ALL PRIVILEGES
+    ON spring_boot_study.*
+    TO 'spring_user'@'localhost';
+```
+
+刷新权限：
+
+```sql
+FLUSH PRIVILEGES;
+```
+
+查看数据库：
+
+```sql
+SHOW DATABASES;
+```
+
+退出：
+
+```sql
+EXIT;
+```
+
+### 为什么不直接让应用使用 root
+
+root 拥有过高权限。给应用创建独立账号，可以把权限限制在指定数据库中，是更好的安全习惯。
+
+## 7. 阶段四：添加 Maven 依赖
+
+打开：
+
+```text
+spring-boot-study/pom.xml
+```
+
+在 `<dependencies>` 内加入：
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa</artifactId>
+</dependency>
+
+<dependency>
+    <groupId>com.mysql</groupId>
+    <artifactId>mysql-connector-j</artifactId>
+    <scope>runtime</scope>
+</dependency>
+```
+
+不要手动填写依赖版本。Spring Boot 的依赖管理会选择与当前 Spring Boot 版本兼容的版本。
+
+保存 `pom.xml` 后，在 Maven 工具窗口点击：
+
+```text
+Reload All Maven Projects
+```
+
+等待依赖下载完成。
+
+### 两个依赖的作用
+
+| 依赖 | 作用 |
+|---|---|
+| `spring-boot-starter-data-jpa` | 提供 Spring Data JPA、Hibernate、事务和 JDBC 支持 |
+| `mysql-connector-j` | 提供连接 MySQL 的 JDBC 驱动 |
+
+## 8. 阶段五：配置数据源
+
+打开：
+
+```text
+src/main/resources/application.properties
+```
+
+保留应用名称，并添加：
+
+```properties
+spring.application.name=spring-boot-study
+
+spring.datasource.url=jdbc:mysql://localhost:3306/spring_boot_study?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+spring.datasource.username=${DB_USERNAME:spring_user}
+spring.datasource.password=${DB_PASSWORD}
+
+spring.jpa.hibernate.ddl-auto=update
+spring.jpa.show-sql=true
+spring.jpa.open-in-view=false
+```
+
+### 配置解释
+
+```properties
+spring.datasource.url=...
+```
+
+指定数据库地址、端口和数据库名称。
+
+```properties
+spring.datasource.username=${DB_USERNAME:spring_user}
+```
+
+优先读取环境变量 `DB_USERNAME`；未提供时使用 `spring_user`。
+
+```properties
+spring.datasource.password=${DB_PASSWORD}
+```
+
+必须从环境变量 `DB_PASSWORD` 读取密码，避免把密码提交到 Git。
+
+```properties
+spring.jpa.hibernate.ddl-auto=update
+```
+
+学习阶段允许 Hibernate 根据 Entity 更新表结构。生产项目通常改用 Flyway 或 Liquibase 管理数据库迁移，不依赖 `update`。
+
+```properties
+spring.jpa.show-sql=true
+```
+
+在控制台显示 Hibernate 执行的 SQL，方便学习。
+
+```properties
+spring.jpa.open-in-view=false
+```
+
+避免在 Web 层隐式保持 EntityManager。本项目实体关系简单，可以明确关闭。
+
+## 9. 阶段六：在 IDEA 中配置密码环境变量
+
+打开运行配置：
+
+```text
+Run → Edit Configurations
+```
+
+选择 `SpringBootStudyApplication`，在 Environment variables 中添加：
+
+```text
+DB_PASSWORD=你创建 spring_user 时设置的密码
+```
+
+如果账号不是 `spring_user`，同时添加：
+
+```text
+DB_USERNAME=实际账号
+```
+
+不要把密码写到：
+
+- `application.properties`
+- Markdown 笔记
+- Git 提交消息
+- Java 源码
+
+IDEA 的本地运行配置通常保存在被忽略的 `.idea` 中，但提交前仍应使用 `git diff` 检查是否意外写入密码。
+
+## 10. 阶段七：把 User record 改成 JPA Entity
+
+JPA Entity 需要可供框架使用的无参构造方法，因此本阶段不再使用 record。
+
+将 `model/User.java` 改为：
+
+```java
+package com.Shuan.spring_boot_study.model;
+
+import jakarta.persistence.Entity;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+
+@Entity
+@Table(name = "app_users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    private String name;
+
+    protected User() {
+    }
+
+    public User(String name) {
+        this.name = name;
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public String getName() {
+        return name;
+    }
+}
+```
+
+### 注解解释
+
+| 注解 | 作用 |
+|---|---|
+| `@Entity` | 声明这是 JPA 实体 |
+| `@Table(name = "app_users")` | 指定数据库表名 |
+| `@Id` | 声明主键字段 |
+| `@GeneratedValue` | 主键由数据库自动生成 |
+
+使用 `app_users` 而不是 `user`，可以避免与数据库中的保留字或系统表概念混淆。
+
+### 为什么有两个构造方法
+
+```java
+protected User() {
+}
+```
+
+供 JPA/Hibernate 创建对象使用。
+
+```java
+public User(String name) {
+    this.name = name;
+}
+```
+
+供业务代码创建新用户使用。新增用户时不传 ID，因为 ID 由数据库生成。
+
+## 11. 阶段八：把 Repository 类改成接口
+
+将原来的内存 `UserRepository` 内容替换为：
+
+```java
+package com.Shuan.spring_boot_study.repository;
+
+import com.Shuan.spring_boot_study.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+}
+```
+
+注意变化：
+
+- 从 `class` 改为 `interface`。
+- 删除内存 `List`。
+- 删除自己编写的 `findAll()` 和 `findById()`。
+- 不需要手动添加 `@Repository`。
+- 继承 `JpaRepository<User, Long>`。
+
+两个泛型参数分别表示：
+
+```text
+User：Repository 管理的实体类型
+Long：User 主键的 Java 类型
+```
+
+Spring Data JPA 会在运行时自动为这个接口创建实现。
+
+`JpaRepository` 已经提供：
+
+- `findAll()`
+- `findById(id)`
+- `save(entity)`
+- `deleteById(id)`
+- `count()`
+
+## 12. 阶段九：调整 UserService
+
+现有查询方法可以继续使用，因为 `JpaRepository` 同样提供 `findAll()` 和 `findById()`。
+
+将 `UserService` 整理为：
+
+```java
+package com.Shuan.spring_boot_study.service;
+
+import com.Shuan.spring_boot_study.model.User;
+import com.Shuan.spring_boot_study.repository.UserRepository;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Optional;
+
+@Service
+public class UserService {
+
+    private final UserRepository userRepository;
+
+    public UserService(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    public List<User> findAll() {
+        return userRepository.findAll();
+    }
+
+    public Optional<User> findById(Long id) {
+        return userRepository.findById(id);
+    }
+
+    public User create(String name) {
+        User user = new User(name);
+        return userRepository.save(user);
+    }
+}
+```
+
+`save()` 执行后，返回的 `User` 会包含数据库生成的 ID。
+
+## 13. 阶段十：创建新增用户请求 DTO
+
+在 `dto` 包中创建：
+
+```text
+CreateUserRequest.java
+```
+
+填写：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+public record CreateUserRequest(
+        String name
+) {
+}
+```
+
+它用于接收请求 JSON：
+
+```json
+{
+  "name": "David"
+}
+```
+
+不要直接让 Entity 承担所有请求 DTO 职责。现在的数据很简单，但提前区分 Entity 和 DTO 有助于后续添加校验与接口版本控制。
+
+## 14. 阶段十一：为 UserController 添加 POST
+
+在 `UserController` 中增加 import：
+
+```java
+import com.Shuan.spring_boot_study.dto.CreateUserRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
+```
+
+然后在类中添加：
+
+```java
+@PostMapping
+@ResponseStatus(HttpStatus.CREATED)
+public User create(@RequestBody CreateUserRequest request) {
+    return userService.create(request.name());
+}
+```
+
+### 新注解解释
+
+- `@PostMapping`：接收 POST 请求。
+- `@RequestBody`：把请求体 JSON 转换为 Java DTO。
+- `@ResponseStatus(HttpStatus.CREATED)`：成功时返回 HTTP 201。
+
+## 15. 阶段十二：第一次启动数据库版本
+
+启动前确认：
+
+- MySQL 服务正在运行。
+- `spring_boot_study` 数据库存在。
+- `spring_user` 有权限。
+- IDEA 运行配置中存在 `DB_PASSWORD`。
+- Maven 依赖下载完成。
+
+然后运行 `SpringBootStudyApplication`。
+
+成功日志中通常能看到：
+
+- HikariCP 连接池启动。
+- Hibernate 初始化。
+- Hibernate 创建或检查 `app_users` 表。
+- Spring Boot 应用启动完成。
+
+如果应用在数据库接入后无法启动，不要先改代码，应先从异常最底部的 `Caused by` 开始检查。
+
+## 16. 阶段十三：测试 CRUD
+
+### 查询空列表
+
+```bash
+curl -i http://localhost:8080/api/users
+```
+
+首次运行时预期：
+
+```json
+[]
+```
+
+### 新增用户
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"David"}' \
+  http://localhost:8080/api/users
+```
+
+预期状态码：
+
+```text
+HTTP/1.1 201
+```
+
+预期 JSON 类似：
+
+```json
+{
+  "id": 1,
+  "name": "David"
+}
+```
+
+### 再次查询全部用户
+
+```bash
+curl -i http://localhost:8080/api/users
+```
+
+应当能看到刚才创建的 David。
+
+### 查询单个用户
+
+按照 POST 响应中的真实 ID 查询：
+
+```bash
+curl -i http://localhost:8080/api/users/1
+```
+
+### 验证持久化
+
+1. 停止 Spring Boot 应用。
+2. 重新启动应用。
+3. 再次执行 `GET /api/users`。
+4. David 仍然存在，说明数据保存在 MySQL，而不是 JVM 内存中。
+
+## 17. 直接在 MySQL 中检查
+
+登录：
+
+```bash
+mysql -u spring_user -p spring_boot_study
+```
+
+查看表：
+
+```sql
+SHOW TABLES;
+```
+
+查看数据：
+
+```sql
+SELECT * FROM app_users;
+```
+
+退出：
+
+```sql
+EXIT;
+```
+
+## 18. 常见错误
+
+### 实际环境问题：同时存在两套 MySQL
+
+本次检查发现电脑中存在两套 MySQL：
+
+```text
+/usr/local/mysql/bin/mysql
+MySQL 8.0.31，来自 MySQL 官方 macOS 安装包
+
+/opt/homebrew/opt/mysql/bin/mysql
+MySQL 9.4.0，来自 Homebrew
+```
+
+正在运行的官方服务进程来自：
+
+```text
+/usr/local/mysql/bin/mysqld
+```
+
+Homebrew 服务状态显示为 `stopped`，但它的启动脚本曾反复尝试启动。错误日志显示：
+
+```text
+Invalid MySQL server upgrade:
+Cannot upgrade from 80031 to 90400.
+```
+
+这表示 Homebrew MySQL 9.4 尝试读取一个由 MySQL 8.0.31 创建的数据目录。MySQL 不支持直接跳过要求的中间版本进行这种升级。
+
+#### 当前安全策略
+
+为了完成 Spring Boot 学习，本阶段选择继续使用已经运行的官方 MySQL 8.0.31，不处理版本升级。
+
+不要执行：
+
+- 删除 `/usr/local/mysql/data`。
+- 删除 `/opt/homebrew/var/mysql`。
+- 在没有备份的情况下执行 Initialize Database。
+- 用 MySQL 9.4 强行打开 8.0.31 数据目录。
+- 同时启动两套服务并让它们争用 3306 端口。
+
+#### 第一步：停止 Homebrew 的启动尝试
+
+由学习者在终端执行：
+
+```bash
+brew services stop mysql
+```
+
+检查：
+
+```bash
+brew services list
+```
+
+确认 `mysql` 显示：
+
+```text
+stopped
+```
+
+#### 第二步：明确使用官方 MySQL 客户端
+
+不要暂时使用 PATH 中的 Homebrew 客户端，改用完整路径：
+
+```bash
+/usr/local/mysql/bin/mysql --version
+```
+
+预期显示 MySQL 8.0.31。
+
+先尝试不提供密码登录：
+
+```bash
+/usr/local/mysql/bin/mysql -u root --skip-password
+```
+
+如果能够登录，立即按照后面的步骤创建应用专用用户，不要让 Spring Boot 使用 root。
+
+如果仍然得到 1045，说明官方 MySQL 的 root 已经设置密码，而当前不知道或输入不正确。
+
+#### 第三步：尝试自己保存的官方安装密码
+
+官方 macOS 安装包在首次配置时要求设置 root 密码。使用明确的官方客户端尝试：
+
+```bash
+/usr/local/mysql/bin/mysql -u root -p
+```
+
+输入密码时终端不会显示字符，这是正常现象。
+
+如果忘记密码，再执行下面的重置流程。不要通过反复猜测密码解决。
+
+#### 第四步：忘记密码时重置 root
+
+这是数据库管理操作。开始前应确认没有需要保留但尚未备份的重要数据库。
+
+1. 在 macOS 系统设置中搜索 MySQL，打开官方 MySQL Preference Pane。
+2. 使用 `Stop MySQL Server` 停止官方 MySQL 服务。
+3. 确认普通方式已经停止后，在终端临时以跳过权限表模式启动：
+
+```bash
+sudo /usr/local/mysql/bin/mysqld_safe \
+  --user=_mysql \
+  --skip-grant-tables \
+  --skip-networking
+```
+
+该终端会持续运行，不要关闭。在另一个终端连接：
+
+```bash
+/usr/local/mysql/bin/mysql -u root
+```
+
+进入 MySQL 后执行：
+
+```sql
+FLUSH PRIVILEGES;
+```
+
+设置新的强密码，将示例文本替换成自己的密码：
+
+```sql
+ALTER USER 'root'@'localhost'
+    IDENTIFIED BY '替换成新的强密码';
+```
+
+退出：
+
+```sql
+EXIT;
+```
+
+回到运行 `mysqld_safe` 的终端，按 `Control + C` 停止临时服务。如果它没有退出，可另开终端使用新密码正常关闭：
+
+```bash
+/usr/local/mysql/bin/mysqladmin -u root -p shutdown
+```
+
+最后回到 MySQL Preference Pane，使用 `Start MySQL Server` 正常启动。
+
+验证新密码：
+
+```bash
+/usr/local/mysql/bin/mysql -u root -p
+```
+
+重置模式使用了 `--skip-networking`，避免重置期间接受网络连接。完成后必须停止临时实例，再恢复正常启动。
+
+#### 第五步：成功登录后继续本任务
+
+登录成功后，回到本任务“阶段三”，依次创建：
+
+```text
+spring_boot_study 数据库
+spring_user 应用账号
+spring_user 对学习数据库的权限
+```
+
+Spring Boot 的 JDBC URL 继续使用：
+
+```properties
+spring.datasource.url=jdbc:mysql://localhost:3306/spring_boot_study
+```
+
+JDBC 驱动连接的是正在监听 3306 端口的 MySQL 8.0 服务，不要求客户端命令与服务器放在同一个安装目录；但排查阶段使用完整路径可以避免混淆两套安装。
+
+### Access denied for user
+
+含义：用户名、密码或授权不正确。
+
+检查：
+
+- `DB_USERNAME` 是否正确。
+- `DB_PASSWORD` 是否与创建用户时一致。
+- 用户是否被授权访问 `spring_boot_study.*`。
+
+### Unknown database
+
+含义：数据库不存在或 URL 中名称拼错。
+
+检查：
+
+```sql
+SHOW DATABASES;
+```
+
+### Communications link failure
+
+常见原因：
+
+- MySQL 服务没有启动。
+- 端口不是 3306。
+- 数据库地址配置错误。
+
+### 实际启动错误：Unable to determine Dialect without JDBC metadata
+
+错误信息：
+
+```text
+Failed to initialize JPA EntityManagerFactory
+Unable to determine Dialect without JDBC metadata
+```
+
+这通常不是要求手动配置 MySQL Dialect，而是 Hibernate 无法建立数据库连接，所以拿不到 JDBC 元数据。
+
+本次检查确认 MySQL 仍以密码重置维护模式运行：
+
+```text
+--skip-grant-tables --skip-networking
+```
+
+其中 `--skip-networking` 会禁用 TCP 网络连接，3306 端口没有监听。Spring Boot 使用 `jdbc:mysql://localhost:3306/...`，因此无法连接。
+
+正确处理方法：
+
+1. 停止维护模式的 `mysqld_safe` 和 `mysqld`。
+2. 确认没有残留 MySQL 进程。
+3. 使用 MySQL Preference Pane 正常启动官方 MySQL 服务。
+4. 确认 3306 端口开始监听。
+5. 使用 `spring_user` 通过 TCP 测试登录。
+6. 再启动 Spring Boot。
+
+不要为了消除该错误而添加：
+
+```properties
+spring.jpa.database-platform=org.hibernate.dialect.MySQLDialect
+```
+
+手动指定 Dialect 不能修复数据库不可连接的问题，只会让真正的连接错误更晚出现。
+
+### Failed to determine a suitable driver class
+
+常见原因：
+
+- `mysql-connector-j` 没有添加。
+- Maven 尚未 Reload。
+- `spring.datasource.url` 缺失或拼写错误。
+
+### Not a managed type
+
+检查：
+
+- `User` 是否有 `@Entity`。
+- 导入是否来自 `jakarta.persistence`。
+- Entity 是否位于启动类包的子包中。
+
+### 实际编译问题：JpaRepository 接口中仍保留内存实现
+
+本次检查发现 `UserRepository` 已经从普通类改成：
+
+```java
+public interface UserRepository extends JpaRepository<User, Long>
+```
+
+但接口内部仍然保留了 Task 07 的内存数据和方法实现：
+
+```java
+private final List<User> users = List.of(...);
+
+public List<User> findAll() {
+    return users;
+}
+
+public Optional<User> findById(long id) {
+    // ...
+}
+```
+
+这会产生多类编译问题：
+
+1. 接口字段不能像普通类的实例字段一样声明为 `private final`。
+2. 接口方法如果有方法体，需要满足接口默认方法或静态方法的规则。
+3. `JpaRepository` 已经提供 `findAll()` 和 `findById()`，不应再次用内存实现覆盖。
+4. `User` 已从 record 改为 Entity 类，不再有 `new User(Long, String)` 构造方法。
+5. Entity 使用 `getId()`，不再有 record 自动生成的 `id()` 方法。
+
+应当删除全部旧内存代码，将文件手动整理为：
+
+```java
+package com.Shuan.spring_boot_study.repository;
+
+import com.Shuan.spring_boot_study.model.User;
+import org.springframework.data.jpa.repository.JpaRepository;
+
+public interface UserRepository extends JpaRepository<User, Long> {
+}
+```
+
+同时删除这些已经不再需要的 import：
+
+```java
+import org.springframework.stereotype.Repository;
+import java.util.List;
+import java.util.Optional;
+```
+
+Spring Data JPA 会在运行时生成 Repository 实现。接口看起来是空的，但已经继承了 `findAll()`、`findById()`、`save()`、`deleteById()` 等方法。
+
+### Table does not exist
+
+检查：
+
+- `spring.jpa.hibernate.ddl-auto=update` 是否生效。
+- 数据库用户是否有建表权限。
+- Entity 是否被扫描。
+
+## 19. 安全检查
+
+提交前执行：
+
+```bash
+git diff
+git diff --cached
+```
+
+确认没有出现：
+
+- MySQL root 密码
+- `spring_user` 的密码
+- 其他令牌或私钥
+
+也可以搜索常见敏感配置：
+
+```bash
+git grep -n 'spring.datasource.password'
+```
+
+正确结果应当是：
+
+```properties
+spring.datasource.password=${DB_PASSWORD}
+```
+
+## 20. 独立练习
+
+### 练习 1：根据名字查询
+
+在 `UserRepository` 中添加：
+
+```java
+Optional<User> findByNameIgnoreCase(String name);
+```
+
+Spring Data JPA 会根据方法名自动生成查询。
+
+然后通过 Service 和 Controller 暴露：
+
+```text
+GET /api/users/search?name=David
+```
+
+### 练习 2：删除用户
+
+添加：
+
+```text
+DELETE /api/users/{id}
+```
+
+思考：
+
+- 删除成功应该返回 200 还是 204？
+- 删除不存在的用户应该返回什么状态码？
+- 判断用户存在的逻辑应该放在哪一层？
+
+### 练习 3：观察 SQL
+
+分别调用：
+
+- 查询全部用户
+- 查询单个用户
+- 新增用户
+
+观察控制台中的 SQL，记录 `select` 和 `insert` 分别在什么时候执行。
+
+## 21. 完成检查
+
+- [ ] 将 `respository` 重命名为 `repository`。
+- [ ] MySQL 可以正常登录。
+- [ ] 创建 `spring_boot_study` 数据库。
+- [ ] 创建权限受限的 `spring_user`。
+- [ ] 添加 JPA 和 MySQL Driver 依赖。
+- [ ] 使用环境变量提供数据库密码。
+- [ ] 将 User 改为 JPA Entity。
+- [ ] 将 UserRepository 改为 JpaRepository 接口。
+- [ ] GET `/api/users` 从 MySQL 查询数据。
+- [ ] POST `/api/users` 返回 201 并写入数据。
+- [ ] 重启应用后数据仍然存在。
+- [ ] Git 中没有数据库密码。
+
+## 22. 学习记录
+
+```text
+MySQL 版本：
+
+数据库名称：
+
+新增用户响应：
+
+重启后数据是否仍然存在：
+
+遇到的问题：
+
+完整错误信息：
+
+解决方法：
+
+我对 JPA、Hibernate 和 Spring Data JPA 关系的理解：
 ```
 
 ---

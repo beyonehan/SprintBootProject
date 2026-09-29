@@ -11,6 +11,12 @@ import org.springframework.http.ResponseEntity;
 import java.util.List;
 import java.util.Optional;
 
+import com.Shuan.spring_boot_study.dto.CreateUserRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.ResponseStatus;
+
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
@@ -32,4 +38,11 @@ public class UserController {
        }
        return ResponseEntity.notFound().build();
    }
+
+   @PostMapping
+   @ResponseStatus(HttpStatus.CREATED)
+    public User create(@RequestBody CreateUserRequest request) {
+       return  userService.create(request.name());
+   }
+
 }

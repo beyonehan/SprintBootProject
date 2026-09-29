@@ -1,10 +1,9 @@
 package com.Shuan.spring_boot_study.service;
 
 import com.Shuan.spring_boot_study.model.User;
-import com.Shuan.spring_boot_study.respository.UserRepository;
+import com.Shuan.spring_boot_study.repository.UserRepository;
 import org.springframework.stereotype.Service;
 
-import javax.swing.text.html.Option;
 import java.util.List;
 import java.util.Optional;
 
@@ -20,5 +19,10 @@ public class UserService {
     }
     public Optional<User> findById(long id) {
         return  userRepository.findById(id);
+    }
+
+    public User create(String name) {
+        User user  = new User(name);
+        return userRepository.save(user);
     }
 }
