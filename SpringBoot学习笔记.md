@@ -13,7 +13,7 @@
 - [x] Task 03：创建第一个 Controller
 - [x] Task 04：解决 IDEA 包创建问题
 - [x] Task 05：配置 Git 忽略规则
-- [ ] Task 06：学习路径参数、查询参数和 JSON 响应
+- [x] Task 06：学习路径参数、查询参数和 JSON 响应
 - [ ] Task 07：项目分层——Controller、Service、Repository
 - [ ] Task 08：接入 MySQL 与 Spring Data JPA
 - [ ] Task 09：参数校验和统一异常处理
@@ -383,6 +383,139 @@ git check-ignore -v .idea/workspace.xml
 
 内层 `spring-boot-study/.gitignore` 已经忽略 `target/`。
 
+## 4. IDEA 看不到代码变化的实际排查记录
+
+本次命令行检查结果：
+
+```text
+Git 仓库根目录：/Users/hanli/Desktop/Study/backend/SprintBootProject
+git status：干净，没有未提交修改
+当前分支：main
+最新提交：d61ca0f
+```
+
+最新提交已经包含：
+
+```text
+ApiController.java
+HelloController.java
+GreetingResponse.java
+```
+
+因此，IDEA 的 `Local Changes` 没有内容是正常的。`Local Changes` 只显示工作区中相对于最新提交尚未提交的修改，不会把已经提交的代码继续显示为变化。
+
+要查看已经提交的代码，应打开：
+
+```text
+View → Tool Windows → Git → Log
+```
+
+然后选择提交：
+
+```text
+d61ca0f
+```
+
+就能查看该提交修改了哪些文件。
+
+### IDEA 项目目录与 Git 根目录
+
+当前 Git 仓库位于外层：
+
+```text
+SprintBootProject/.git
+```
+
+Spring Boot Maven 项目位于内层：
+
+```text
+SprintBootProject/spring-boot-study
+```
+
+如果 IDEA 只打开内层 `spring-boot-study`，Git 根目录位于项目目录之外，IDEA 可能不会自动关联它。
+
+推荐方式是让 IDEA 打开外层：
+
+```text
+/Users/hanli/Desktop/Study/backend/SprintBootProject
+```
+
+然后把内层 `spring-boot-study/pom.xml` 添加为 Maven 项目。这样 IDEA 可以同时看到：
+
+- 外层 Git 仓库
+- 学习笔记
+- 内层 Maven 项目
+- Spring Boot 源码
+
+### 手动配置 Git 目录映射
+
+如果 Git 工具窗口中看不到 Log 或分支信息，打开：
+
+```text
+Settings
+→ Version Control
+→ Directory Mappings
+```
+
+检查是否存在：
+
+```text
+Directory: /Users/hanli/Desktop/Study/backend/SprintBootProject
+VCS: Git
+```
+
+如果没有，由学习者手动使用 `+` 添加该目录，并选择 `Git`。
+
+有些 IDEA 版本也可以使用：
+
+```text
+VCS → Enable Version Control Integration → Git
+```
+
+### 验证 IDEA 是否能显示新变化
+
+不要为了测试而随意修改业务逻辑。可以在 `HelloController.java` 的空白处临时增加一行注释，例如：
+
+```java
+// Git change test
+```
+
+保存后先在命令行检查：
+
+```bash
+git status --short
+```
+
+应该出现类似：
+
+```text
+M spring-boot-study/src/main/java/com/Shuan/spring_boot_study/controller/HelloController.java
+```
+
+再打开 IDEA：
+
+```text
+View → Tool Windows → Commit
+```
+
+或：
+
+```text
+View → Tool Windows → Git → Local Changes
+```
+
+应该能看到相同文件。验证后可以由学习者删除测试注释。
+
+### Git 窗口的三个概念
+
+| 位置 | 显示内容 |
+|---|---|
+| Local Changes / Commit | 尚未提交的修改 |
+| Git Log | 已经完成的历史提交 |
+| Branches | 本地和远程分支 |
+
+命令行完成 `git add` 不会让变化消失，只会把它放入暂存区；完成 `git commit` 后，本地变化才会从 Local Changes 中消失并进入 Git Log。
+
 ---
 
 # Task 06：路径参数、查询参数和 JSON 响应
@@ -719,6 +852,548 @@ GET /api/products/100
 路径参数和查询参数的区别：
 
 我对 JSON 序列化的理解：
+```
+
+---
+
+# Task 07：Controller、Service、Repository 分层
+
+## 1. 本任务目标
+
+上一阶段把全部逻辑直接写在 Controller 中。代码较少时可以运行，但随着业务增加，Controller 会越来越臃肿。
+
+本阶段使用一个暂存在内存中的用户列表，学习：
+
+1. Controller、Service、Repository 各自负责什么。
+2. 什么是 Spring Bean。
+3. 如何使用构造器注入。
+4. 如何通过 `Optional` 表达“可能找不到”。
+5. 如何用 `ResponseEntity` 返回 200 或 404。
+
+本阶段暂时不连接数据库。先理解分层关系，再在 Task 08 中将内存 Repository 替换为数据库 Repository。
+
+## 2. 三层职责
+
+```text
+HTTP 请求
+    ↓
+Controller：接收请求、读取参数、返回 HTTP 响应
+    ↓
+Service：处理业务规则
+    ↓
+Repository：读取或保存数据
+```
+
+各层职责：
+
+| 层 | 负责 | 不应该负责 |
+|---|---|---|
+| Controller | HTTP 路径、参数、状态码 | 复杂业务规则、数据库细节 |
+| Service | 业务流程和规则 | HTTP 路径、数据库连接细节 |
+| Repository | 数据查询与保存 | HTTP 响应、页面展示 |
+
+## 3. 本任务最终目录
+
+你将手动创建：
+
+```text
+com/Shuan/spring_boot_study/
+├── controller/
+│   ├── ApiController.java
+│   ├── HelloController.java
+│   └── UserController.java
+├── model/
+│   └── User.java
+├── repository/
+│   └── UserRepository.java
+└── service/
+    └── UserService.java
+```
+
+创建顺序建议为：
+
+```text
+User → UserRepository → UserService → UserController
+```
+
+这样每一层依赖的类型都已经存在，错误更容易理解。
+
+## 4. 第一步：创建 User 模型
+
+在 `com.Shuan.spring_boot_study` 下创建 `model` 包，再创建：
+
+```text
+User.java
+```
+
+填写：
+
+```java
+package com.Shuan.spring_boot_study.model;
+
+public record User(
+        Long id,
+        String name
+) {
+}
+```
+
+### 为什么使用 record
+
+用户数据目前只有 `id` 和 `name`。使用 record 可以自动生成：
+
+- 构造方法
+- `id()`
+- `name()`
+- `equals()`
+- `hashCode()`
+- `toString()`
+
+当前的 `User` 只是内存数据模型，还不是数据库实体，因此暂时不添加 `@Entity`。
+
+## 5. 第二步：创建 Repository
+
+创建 `repository` 包，再创建：
+
+```text
+UserRepository.java
+```
+
+填写：
+
+```java
+package com.Shuan.spring_boot_study.repository;
+
+import com.Shuan.spring_boot_study.model.User;
+import org.springframework.stereotype.Repository;
+
+import java.util.List;
+import java.util.Optional;
+
+@Repository
+public class UserRepository {
+
+    private final List<User> users = List.of(
+            new User(1L, "Alice"),
+            new User(2L, "Bob"),
+            new User(3L, "Charlie")
+    );
+
+    public List<User> findAll() {
+        return users;
+    }
+
+    public Optional<User> findById(Long id) {
+        return users.stream()
+                .filter(user -> user.id().equals(id))
+                .findFirst();
+    }
+}
+```
+
+### @Repository
+
+```java
+@Repository
+```
+
+告诉 Spring：这个类是数据访问组件。应用启动时，Spring 会创建并管理它的实例。
+
+被 Spring 创建和管理的对象通常称为 Spring Bean。
+
+### List.of
+
+```java
+List.of(...)
+```
+
+创建一个不可修改的内存列表。本阶段每次重启应用，数据都会恢复为代码中的三位用户。
+
+### Optional
+
+```java
+Optional<User>
+```
+
+表示查询结果可能包含一个用户，也可能什么都没有。它比直接返回 `null` 更明确。
+
+### Stream 查询过程
+
+```java
+users.stream()
+        .filter(user -> user.id().equals(id))
+        .findFirst();
+```
+
+可以理解为：
+
+1. 依次读取列表中的用户。
+2. 只保留 ID 与参数相等的用户。
+3. 返回第一个匹配项。
+4. 没有匹配项时返回空的 Optional。
+
+## 6. 第三步：创建 Service
+
+创建 `service` 包，再创建：
+
+```text
+UserService.java
+```
+
+填写：
+
+```java
+package com.Shuan.spring_boot_study.service;
+
+import com.Shuan.spring_boot_study.model.User;
+import com.Shuan.spring_boot_study.repository.UserRepository;
+import org.springframework.stereotype.Service;
+
+import java.util.List;
+import java.util.Optional;
+
+@Service
+public class UserService {
+
+    private final UserRepository userRepository;
+
+    public UserService(UserRepository userRepository) {
+        this.userRepository = userRepository;
+    }
+
+    public List<User> findAll() {
+        return userRepository.findAll();
+    }
+
+    public Optional<User> findById(Long id) {
+        return userRepository.findById(id);
+    }
+}
+```
+
+### @Service
+
+```java
+@Service
+```
+
+表示该类承担业务逻辑职责。Spring 会将它注册为 Bean。
+
+### 构造器注入
+
+```java
+public UserService(UserRepository userRepository) {
+    this.userRepository = userRepository;
+}
+```
+
+`UserService` 需要 `UserRepository` 才能工作。Spring 创建 Service 时，会找到已经管理的 Repository 并传入构造方法。
+
+这称为依赖注入。
+
+当前类只有一个构造方法，因此不需要额外写 `@Autowired`。
+
+构造器注入的优点：
+
+- 依赖关系明确。
+- 字段可以声明为 `final`。
+- 对象创建后依赖不会被随意替换。
+- 更容易编写测试。
+
+初学阶段不要使用字段注入：
+
+```java
+// 不推荐
+@Autowired
+private UserRepository userRepository;
+```
+
+## 7. 第四步：创建 Controller
+
+在现有 `controller` 包中创建：
+
+```text
+UserController.java
+```
+
+填写：
+
+```java
+package com.Shuan.spring_boot_study.controller;
+
+import com.Shuan.spring_boot_study.model.User;
+import com.Shuan.spring_boot_study.service.UserService;
+import org.springframework.http.ResponseEntity;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RestController;
+
+import java.util.List;
+import java.util.Optional;
+
+@RestController
+@RequestMapping("/api/users")
+public class UserController {
+
+    private final UserService userService;
+
+    public UserController(UserService userService) {
+        this.userService = userService;
+    }
+
+    @GetMapping
+    public List<User> findAll() {
+        return userService.findAll();
+    }
+
+    @GetMapping("/{id}")
+    public ResponseEntity<User> findById(@PathVariable Long id) {
+        Optional<User> user = userService.findById(id);
+
+        if (user.isPresent()) {
+            return ResponseEntity.ok(user.get());
+        }
+
+        return ResponseEntity.notFound().build();
+    }
+}
+```
+
+### 路径组合
+
+类上的：
+
+```java
+@RequestMapping("/api/users")
+```
+
+与方法上的映射组合：
+
+| 方法映射 | 最终路径 |
+|---|---|
+| `@GetMapping` | `GET /api/users` |
+| `@GetMapping("/{id}")` | `GET /api/users/{id}` |
+
+### ResponseEntity
+
+`ResponseEntity` 允许 Controller 同时控制响应体和 HTTP 状态码：
+
+```java
+ResponseEntity.ok(user.get())
+```
+
+返回 HTTP 200 和用户 JSON。
+
+```java
+ResponseEntity.notFound().build()
+```
+
+返回 HTTP 404，不返回响应体。
+
+## 8. 第五步：启动并验证
+
+停止旧进程并重新运行应用，然后验证全部用户：
+
+```bash
+curl -i http://localhost:8080/api/users
+```
+
+预期状态码：
+
+```text
+HTTP/1.1 200
+```
+
+预期 JSON 类似：
+
+```json
+[
+  {
+    "id": 1,
+    "name": "Alice"
+  },
+  {
+    "id": 2,
+    "name": "Bob"
+  },
+  {
+    "id": 3,
+    "name": "Charlie"
+  }
+]
+```
+
+查询存在的用户：
+
+```bash
+curl -i http://localhost:8080/api/users/2
+```
+
+预期：
+
+```text
+HTTP/1.1 200
+```
+
+```json
+{
+  "id": 2,
+  "name": "Bob"
+}
+```
+
+查询不存在的用户：
+
+```bash
+curl -i http://localhost:8080/api/users/99
+```
+
+预期：
+
+```text
+HTTP/1.1 404
+```
+
+## 9. 调用链
+
+以 `GET /api/users/2` 为例：
+
+```text
+浏览器或 curl
+    ↓
+UserController.findById(2)
+    ↓
+UserService.findById(2)
+    ↓
+UserRepository.findById(2)
+    ↓
+从内存 List 中找到 Bob
+    ↓
+Optional<User>
+    ↓
+ResponseEntity 200 + User JSON
+```
+
+Controller 不知道数据具体存在哪里，只调用 Service；Service 不处理 HTTP 状态码，只调用 Repository；Repository 专注于查找数据。
+
+## 10. 常见错误
+
+### NoSuchBeanDefinitionException
+
+可能原因：
+
+- 忘记给 Repository 添加 `@Repository`。
+- 忘记给 Service 添加 `@Service`。
+- 类不在启动类包的子包中。
+
+### Ambiguous mapping
+
+表示两个 Controller 注册了相同的 HTTP 方法和路径。
+
+当前 `ApiController` 中已有：
+
+```text
+GET /api/user/{id}
+```
+
+新接口是：
+
+```text
+GET /api/users/{id}
+```
+
+一个是 `user`，一个是 `users`，所以不会冲突。后续整理接口时可以删除或重构旧的练习接口，但本任务不要求现在删除。
+
+### 访问 /api/users 得到 404
+
+检查：
+
+1. `UserController` 是否位于 `controller` 包。
+2. 类上是否有 `@RestController`。
+3. 类上路径是否为 `/api/users`。
+4. 新建类后是否重新启动应用。
+
+### 代码显示 Optional 找不到
+
+确认导入：
+
+```java
+import java.util.Optional;
+```
+
+不要错误导入其他包中的同名类型。
+
+## 11. 独立练习
+
+### 练习 1：按名称查询
+
+目标接口：
+
+```text
+GET /api/users/search?name=Alice
+```
+
+建议步骤：
+
+1. Repository 添加 `findByName(String name)`。
+2. Service 添加对应方法。
+3. Controller 使用 `@RequestParam` 接收名称。
+4. 找到时返回 200，找不到时返回 404。
+
+可以使用：
+
+```java
+user.name().equalsIgnoreCase(name)
+```
+
+### 练习 2：Service 增加业务规则
+
+在 `findById` 中规定：如果 `id <= 0`，直接返回空 Optional，不再调用 Repository。
+
+思考：为什么这种规则更适合放在 Service，而不是 Repository？
+
+### 练习 3：断点观察调用链
+
+分别在以下方法左侧添加断点：
+
+```text
+UserController.findById
+UserService.findById
+UserRepository.findById
+```
+
+使用 Debug 模式启动，访问 `/api/users/2`，观察程序进入方法的顺序和 `id` 的值。
+
+## 12. 完成检查
+
+- [ ] 创建 `User` record。
+- [ ] 创建带 `@Repository` 的 `UserRepository`。
+- [ ] 创建带 `@Service` 的 `UserService`。
+- [ ] 创建带 `@RestController` 的 `UserController`。
+- [ ] 使用构造器注入，没有使用字段注入。
+- [ ] `GET /api/users` 返回用户数组。
+- [ ] `GET /api/users/2` 返回 Bob 和 200。
+- [ ] `GET /api/users/99` 返回 404。
+- [ ] 能画出 Controller → Service → Repository 调用链。
+- [ ] 能解释 Spring Bean 和依赖注入。
+
+## 13. 学习记录
+
+```text
+完成日期：
+
+遇到的问题：
+
+错误信息：
+
+解决方法：
+
+我对三层职责的理解：
+
+我对依赖注入的理解：
+
+为什么使用 Optional：
 ```
 
 ---
