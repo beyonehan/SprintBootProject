@@ -15,7 +15,7 @@
 - [x] Task 05：配置 Git 忽略规则
 - [x] Task 06：学习路径参数、查询参数和 JSON 响应
 - [x] Task 07：项目分层——Controller、Service、Repository
-- [ ] Task 08：接入 MySQL 与 Spring Data JPA
+- [x] Task 08：接入 MySQL 与 Spring Data JPA
 - [ ] Task 09：参数校验和统一异常处理
 - [ ] Task 10：编写自动化测试
 
@@ -2444,6 +2444,734 @@ MySQL 版本：
 解决方法：
 
 我对 JPA、Hibernate 和 Spring Data JPA 关系的理解：
+```
+
+---
+
+# Task 09：参数校验与统一异常处理
+
+## 1. 为什么需要这一阶段
+
+当前新增用户接口可以收到：
+
+```json
+{
+  "name": ""
+}
+```
+
+甚至：
+
+```json
+{}
+```
+
+如果不校验，这些不完整数据可能被保存到数据库。
+
+当前查询不存在用户时，Controller 自己检查 `Optional` 并返回 404。随着接口增加，每个 Controller 都重复这种判断，代码会逐渐混乱。
+
+本阶段目标：
+
+```text
+请求 DTO 负责声明输入规则
+Service 负责判断业务对象是否存在
+自定义异常表达业务失败
+全局异常处理器统一生成错误 JSON
+```
+
+## 2. 最终效果
+
+合法请求：
+
+```http
+POST /api/users
+Content-Type: application/json
+
+{
+  "name": "David"
+}
+```
+
+返回 HTTP 201。
+
+非法请求：
+
+```json
+{
+  "name": ""
+}
+```
+
+返回 HTTP 400 和统一 JSON，例如：
+
+```json
+{
+  "timestamp": "2026-09-29T10:00:00Z",
+  "status": 400,
+  "error": "Bad Request",
+  "message": "请求参数校验失败",
+  "path": "/api/users",
+  "fieldErrors": {
+    "name": "用户名不能为空"
+  }
+}
+```
+
+查询不存在用户：
+
+```text
+GET /api/users/999
+```
+
+返回 HTTP 404 和相同结构的错误 JSON。
+
+## 3. 第一步：添加 Validation 依赖
+
+在 `pom.xml` 的 `<dependencies>` 中加入：
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-validation</artifactId>
+</dependency>
+```
+
+保存后，在 Maven 工具窗口点击：
+
+```text
+Reload All Maven Projects
+```
+
+这个 Starter 通常提供 Hibernate Validator，它与数据库使用的 Hibernate ORM 不是同一个职责：
+
+- Hibernate ORM：Entity 与数据库表映射。
+- Hibernate Validator：按照注解校验 Java 数据。
+
+## 4. 第二步：给请求 DTO 添加校验规则
+
+将 `CreateUserRequest.java` 改为：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+public record CreateUserRequest(
+        @NotBlank(message = "用户名不能为空")
+        @Size(min = 2, max = 50, message = "用户名长度必须在 2 到 50 个字符之间")
+        String name
+) {
+}
+```
+
+### @NotBlank
+
+拒绝：
+
+- `null`
+- 空字符串 `""`
+- 只有空格的字符串 `"   "`
+
+### @Size
+
+限制字符串长度。本例要求 2～50 个字符。
+
+### 为什么校验加在 DTO
+
+`CreateUserRequest` 描述“创建用户接口允许接收什么”。它属于接口边界，因此适合声明输入规则。
+
+Entity 也可以使用数据库相关约束，但请求 DTO 和数据库 Entity 的职责不同，不应该假设二者永远具有完全相同的字段和规则。
+
+## 5. 第三步：在 Controller 中触发校验
+
+在 `UserController` 中导入：
+
+```java
+import jakarta.validation.Valid;
+```
+
+将创建方法从：
+
+```java
+public User create(@RequestBody CreateUserRequest request)
+```
+
+改成：
+
+```java
+public User create(@Valid @RequestBody CreateUserRequest request)
+```
+
+完整方法：
+
+```java
+@PostMapping
+@ResponseStatus(HttpStatus.CREATED)
+public User create(@Valid @RequestBody CreateUserRequest request) {
+    return userService.create(request.name());
+}
+```
+
+`@Valid` 的作用是告诉 Spring MVC：完成 JSON 到 DTO 的转换后，继续执行 DTO 字段上的 Bean Validation 规则。
+
+没有 `@Valid` 时，DTO 上虽然写了校验注解，但这个请求参数不会自动触发校验。
+
+## 6. 第四步：先观察 Spring 默认响应
+
+在编写全局异常处理器之前，先启动应用测试一次：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":""}' \
+  http://localhost:8080/api/users
+```
+
+预期 HTTP 状态码：
+
+```text
+400 Bad Request
+```
+
+Spring MVC 对 `@Valid @RequestBody` 校验失败通常抛出：
+
+```text
+MethodArgumentNotValidException
+```
+
+先确认校验确实发生，再继续定制错误 JSON。
+
+## 7. 第五步：创建用户不存在异常
+
+在根包下创建 `exception` 包：
+
+```text
+com.Shuan.spring_boot_study.exception
+```
+
+创建 `UserNotFoundException.java`：
+
+```java
+package com.Shuan.spring_boot_study.exception;
+
+public class UserNotFoundException extends RuntimeException {
+
+    public UserNotFoundException(Long id) {
+        super("用户不存在，id=" + id);
+    }
+}
+```
+
+### 为什么继承 RuntimeException
+
+它表达运行时发生的业务失败。调用方不需要在每一层用 `throws` 声明，而是由统一异常处理器转换为 HTTP 响应。
+
+不要在 Repository 抛出这个业务异常。Repository 只负责返回有没有查到数据；“没查到用户时如何处理”属于业务规则，应由 Service 决定。
+
+## 8. 第六步：让 Service 处理不存在的用户
+
+在 `UserService` 中导入：
+
+```java
+import com.Shuan.spring_boot_study.exception.UserNotFoundException;
+```
+
+新增方法：
+
+```java
+public User findByIdOrThrow(Long id) {
+    return userRepository.findById(id)
+            .orElseThrow(() -> new UserNotFoundException(id));
+}
+```
+
+### orElseThrow
+
+```java
+optional.orElseThrow(...)
+```
+
+表示：
+
+- Optional 中有用户：返回用户。
+- Optional 为空：创建并抛出 `UserNotFoundException`。
+
+这里使用 Lambda：
+
+```java
+() -> new UserNotFoundException(id)
+```
+
+只有 Optional 为空时才会创建异常对象。
+
+原来的 `findById()` 暂时可以保留用于对比。完成本任务后，如果没有其他代码使用，可以再删除。
+
+## 9. 第七步：简化 Controller 查询方法
+
+原来的方法在 Controller 中判断 Optional：
+
+```java
+@GetMapping("/{id}")
+public ResponseEntity<User> findById(@PathVariable Long id) {
+    Optional<User> user = userService.findById(id);
+
+    if (user.isPresent()) {
+        return ResponseEntity.ok(user.get());
+    }
+
+    return ResponseEntity.notFound().build();
+}
+```
+
+改成：
+
+```java
+@GetMapping("/{id}")
+public User findById(@PathVariable Long id) {
+    return userService.findByIdOrThrow(id);
+}
+```
+
+现在 Controller 只负责接收路径参数并调用 Service。
+
+暂时删除不再使用的 import：
+
+```java
+import org.springframework.http.ResponseEntity;
+import java.util.Optional;
+```
+
+## 10. 第八步：定义统一错误响应
+
+在 `dto` 包中创建 `ApiError.java`：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import java.time.Instant;
+import java.util.Map;
+
+public record ApiError(
+        Instant timestamp,
+        int status,
+        String error,
+        String message,
+        String path,
+        Map<String, String> fieldErrors
+) {
+}
+```
+
+字段含义：
+
+| 字段 | 含义 |
+|---|---|
+| `timestamp` | 错误发生时间 |
+| `status` | HTTP 状态码 |
+| `error` | 状态码名称 |
+| `message` | 对错误的整体说明 |
+| `path` | 发生错误的请求路径 |
+| `fieldErrors` | 字段级校验错误 |
+
+普通业务异常没有字段错误时，可以返回空 Map。
+
+## 11. 第九步：创建全局异常处理器
+
+在 `exception` 包中创建：
+
+```text
+GlobalExceptionHandler.java
+```
+
+填写：
+
+```java
+package com.Shuan.spring_boot_study.exception;
+
+import com.Shuan.spring_boot_study.dto.ApiError;
+import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.MethodArgumentNotValidException;
+import org.springframework.web.bind.annotation.ExceptionHandler;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestControllerAdvice;
+
+import java.time.Instant;
+import java.util.LinkedHashMap;
+import java.util.Map;
+
+@RestControllerAdvice
+public class GlobalExceptionHandler {
+
+    @ExceptionHandler(UserNotFoundException.class)
+    @ResponseStatus(HttpStatus.NOT_FOUND)
+    public ApiError handleUserNotFound(
+            UserNotFoundException exception,
+            HttpServletRequest request) {
+
+        return new ApiError(
+                Instant.now(),
+                HttpStatus.NOT_FOUND.value(),
+                HttpStatus.NOT_FOUND.getReasonPhrase(),
+                exception.getMessage(),
+                request.getRequestURI(),
+                Map.of()
+        );
+    }
+
+    @ExceptionHandler(MethodArgumentNotValidException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiError handleValidation(
+            MethodArgumentNotValidException exception,
+            HttpServletRequest request) {
+
+        Map<String, String> fieldErrors = new LinkedHashMap<>();
+
+        exception.getBindingResult()
+                .getFieldErrors()
+                .forEach(error -> fieldErrors.putIfAbsent(
+                        error.getField(),
+                        error.getDefaultMessage()
+                ));
+
+        return new ApiError(
+                Instant.now(),
+                HttpStatus.BAD_REQUEST.value(),
+                HttpStatus.BAD_REQUEST.getReasonPhrase(),
+                "请求参数校验失败",
+                request.getRequestURI(),
+                fieldErrors
+        );
+    }
+}
+```
+
+### @RestControllerAdvice
+
+它相当于：
+
+```text
+@ControllerAdvice + @ResponseBody
+```
+
+其中的异常处理方法可以应用到多个 Controller，返回对象会被序列化成 JSON。
+
+### @ExceptionHandler
+
+```java
+@ExceptionHandler(UserNotFoundException.class)
+```
+
+表示该方法专门处理 `UserNotFoundException`。
+
+应该优先编写具体异常的处理方法，不要一开始只写一个捕获全部 `Exception` 的方法，否则容易隐藏真正的程序错误。
+
+## 12. 第十步：让数据库约束与接口规则保持一致
+
+在 `User` Entity 的 `name` 字段上添加：
+
+```java
+import jakarta.persistence.Column;
+```
+
+将字段改成：
+
+```java
+@Column(nullable = false, length = 50)
+private String name;
+```
+
+这表示数据库层面不允许 `name` 为 NULL，最大长度为 50。
+
+注意：
+
+- Bean Validation 负责尽早拒绝不合法 HTTP 输入。
+- 数据库约束负责保护最终持久化的数据。
+- 两层校验并不重复浪费，而是保护不同边界。
+
+如果数据库中已经存在 NULL 或超长数据，Hibernate 修改表结构时可能失败。学习项目可以先检查：
+
+```sql
+SELECT *
+FROM app_users
+WHERE name IS NULL OR CHAR_LENGTH(name) > 50;
+```
+
+## 13. 验证合法请求
+
+重新启动应用，执行：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Emma"}' \
+  http://localhost:8080/api/users
+```
+
+预期：
+
+```text
+HTTP/1.1 201
+```
+
+并返回带自动生成 ID 的用户 JSON。
+
+## 14. 验证空名称
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":""}' \
+  http://localhost:8080/api/users
+```
+
+预期：
+
+```text
+HTTP/1.1 400
+```
+
+响应中的 `fieldErrors.name` 应为：
+
+```text
+用户名不能为空
+```
+
+## 15. 验证过短名称
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"A"}' \
+  http://localhost:8080/api/users
+```
+
+预期返回 HTTP 400，字段错误说明长度必须在 2～50 个字符之间。
+
+## 16. 验证缺少字段
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{}' \
+  http://localhost:8080/api/users
+```
+
+反序列化后 `name` 为 null，`@NotBlank` 应当拒绝它并返回 HTTP 400。
+
+## 17. 验证用户不存在
+
+```bash
+curl -i http://localhost:8080/api/users/999999
+```
+
+预期：
+
+```text
+HTTP/1.1 404
+```
+
+JSON 中应包含：
+
+```json
+{
+  "status": 404,
+  "error": "Not Found",
+  "message": "用户不存在，id=999999",
+  "path": "/api/users/999999",
+  "fieldErrors": {}
+}
+```
+
+## 18. 请求失败流程
+
+### DTO 校验失败
+
+```text
+POST JSON
+    ↓
+Jackson 转换为 CreateUserRequest
+    ↓
+@Valid 触发 @NotBlank 和 @Size
+    ↓
+MethodArgumentNotValidException
+    ↓
+GlobalExceptionHandler
+    ↓
+HTTP 400 + ApiError JSON
+```
+
+### 用户不存在
+
+```text
+GET /api/users/999
+    ↓
+UserController
+    ↓
+UserService.findByIdOrThrow
+    ↓
+Repository 返回 Optional.empty()
+    ↓
+抛出 UserNotFoundException
+    ↓
+GlobalExceptionHandler
+    ↓
+HTTP 404 + ApiError JSON
+```
+
+## 19. 常见问题
+
+### 校验注解没有效果
+
+检查：
+
+1. `pom.xml` 是否有 `spring-boot-starter-validation`。
+2. Maven 是否已经 Reload。
+3. Controller 参数前是否有 `@Valid`。
+4. 是否导入 `jakarta.validation.Valid`，而不是其他同名类型。
+5. DTO 是否使用 `jakarta.validation.constraints` 下的注解。
+
+### 错误仍然返回 Spring 默认格式
+
+检查：
+
+1. `GlobalExceptionHandler` 是否有 `@RestControllerAdvice`。
+2. 该类是否位于启动类包的子包中。
+3. 是否处理了 `MethodArgumentNotValidException`。
+4. 新建文件后是否重新启动应用。
+
+### 同一个字段产生两条错误
+
+空字符串可能同时违反 `@NotBlank` 和 `@Size`。示例使用 `putIfAbsent`，每个字段只保留第一条信息，因此具体显示哪一条可能与校验器返回顺序有关。
+
+此阶段先接受这一行为。后续可以使用 Validation Groups 或更精细的错误列表设计。
+
+### JSON 格式错误
+
+例如请求体缺少右花括号时，异常发生在 DTO 校验之前，通常是 `HttpMessageNotReadableException`。
+
+本阶段先观察 Spring 默认响应。独立练习中再为它增加统一处理。
+
+### 实际编译错误：cannot find symbol runtimeException
+
+本次 `UserNotFoundException` 写成了：
+
+```java
+public class UserNotFoundException extends runtimeException
+```
+
+Java 区分大小写，标准异常类的正确名称是：
+
+```java
+RuntimeException
+```
+
+正确文件应为：
+
+```java
+package com.Shuan.spring_boot_study.exception;
+
+public class UserNotFoundException extends RuntimeException {
+
+    public UserNotFoundException(Long id) {
+        super("用户不存在，id=" + id);
+    }
+}
+```
+
+`RuntimeException` 属于 `java.lang`，Java 会自动导入，因此不需要手动添加 import。
+
+同时，`UserService` 中曾误加：
+
+```java
+import com.Shuan.spring_boot_study.exception;
+```
+
+这是包名，不是具体类型，不能用这种形式导入，应删除。保留具体的类导入：
+
+```java
+import com.Shuan.spring_boot_study.exception.UserNotFoundException;
+```
+
+遇到 `cannot find symbol` 时，要检查错误中的 symbol，并重点核对名称拼写、大小写以及 import 是否指向具体类型。
+
+## 20. 独立练习
+
+### 练习 1：处理非法 JSON
+
+为 `HttpMessageNotReadableException` 添加异常处理，返回 HTTP 400：
+
+```text
+请求 JSON 格式错误
+```
+
+### 练习 2：校验路径 ID
+
+要求用户 ID 必须大于等于 1。
+
+可以研究：
+
+```java
+@Min(1)
+```
+
+Spring MVC 对直接写在方法参数上的约束可能抛出 `HandlerMethodValidationException`，它与 DTO 校验产生的 `MethodArgumentNotValidException` 不同。
+
+### 练习 3：名称去除首尾空格
+
+思考以下输入：
+
+```json
+{
+  "name": "  Emma  "
+}
+```
+
+应该原样保存，还是保存 `Emma`？这个转换属于业务规则，适合放在 Service 的 `create()` 中：
+
+```java
+String normalizedName = name.trim();
+```
+
+## 21. 完成检查
+
+- [ ] 添加 `spring-boot-starter-validation`。
+- [ ] CreateUserRequest 使用 `@NotBlank` 和 `@Size`。
+- [ ] Controller 使用 `@Valid @RequestBody`。
+- [ ] 创建 `UserNotFoundException`。
+- [ ] Service 使用 `orElseThrow`。
+- [ ] Controller 不再手动判断 Optional。
+- [ ] 创建统一 `ApiError` record。
+- [ ] 创建 `GlobalExceptionHandler`。
+- [ ] 空名称返回 HTTP 400。
+- [ ] 不存在用户返回 HTTP 404。
+- [ ] 错误响应具有统一 JSON 结构。
+- [ ] 合法用户仍能正常保存到 MySQL。
+
+## 22. 学习记录
+
+```text
+完成日期：
+
+合法 POST 状态码：
+
+空名称响应：
+
+不存在用户响应：
+
+遇到的问题：
+
+解决方法：
+
+我对 DTO 校验的理解：
+
+我对全局异常处理的理解：
 ```
 
 ---

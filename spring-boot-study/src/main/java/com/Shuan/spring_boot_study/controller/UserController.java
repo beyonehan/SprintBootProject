@@ -1,21 +1,13 @@
 package com.Shuan.spring_boot_study.controller;
 import com.Shuan.spring_boot_study.model.User;
 import com.Shuan.spring_boot_study.service.UserService;
-import org.springframework.web.bind.annotation.RestController;
-import org.springframework.web.bind.annotation.RequestParam;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.PathVariable;
-import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.*;
 import org.springframework.http.ResponseEntity;
 
 import java.util.List;
-import java.util.Optional;
-
 import com.Shuan.spring_boot_study.dto.CreateUserRequest;
 import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.ResponseStatus;
+import jakarta.validation.Valid;
 
 @RestController
 @RequestMapping("/api/users")
@@ -31,17 +23,20 @@ public class UserController {
    }
 
    @GetMapping("/{id}")
-    public  ResponseEntity<User> findById(@PathVariable Long id) {
-       Optional<User> user = userService.findById(id);
-       if (user.isPresent()) {
-           return  ResponseEntity.ok(user.get());
-       }
-       return ResponseEntity.notFound().build();
+//    public  ResponseEntity<User> findById(@PathVariable Long id) {
+//       Optional<User> user = userService.findById(id);
+//       if (user.isPresent()) {
+//           return  ResponseEntity.ok(user.get());
+//       }
+//       return ResponseEntity.notFound().build();
+//   }
+   public  User findBy(@PathVariable Long id) {
+       return userService.findByIdOrThrow(id);
    }
 
    @PostMapping
    @ResponseStatus(HttpStatus.CREATED)
-    public User create(@RequestBody CreateUserRequest request) {
+    public User create( @Valid @RequestBody CreateUserRequest request) {
        return  userService.create(request.name());
    }
 

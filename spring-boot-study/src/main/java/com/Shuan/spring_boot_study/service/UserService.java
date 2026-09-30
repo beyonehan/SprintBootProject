@@ -1,11 +1,13 @@
 package com.Shuan.spring_boot_study.service;
 
+import com.Shuan.spring_boot_study.exception.UserNotFoundException;
 import com.Shuan.spring_boot_study.model.User;
 import com.Shuan.spring_boot_study.repository.UserRepository;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
 import java.util.Optional;
+
 
 @Service
 public class UserService {
@@ -24,5 +26,10 @@ public class UserService {
     public User create(String name) {
         User user  = new User(name);
         return userRepository.save(user);
+    }
+
+    public User findByIdOrThrow(Long id) {
+        return userRepository.findById(id)
+                .orElseThrow(() -> new UserNotFoundException(id));
     }
 }
