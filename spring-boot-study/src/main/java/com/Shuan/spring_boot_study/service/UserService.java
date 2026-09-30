@@ -3,6 +3,7 @@ package com.Shuan.spring_boot_study.service;
 import com.Shuan.spring_boot_study.exception.UserNotFoundException;
 import com.Shuan.spring_boot_study.model.User;
 import com.Shuan.spring_boot_study.repository.UserRepository;
+import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
@@ -31,5 +32,18 @@ public class UserService {
     public User findByIdOrThrow(Long id) {
         return userRepository.findById(id)
                 .orElseThrow(() -> new UserNotFoundException(id));
+    }
+
+    @Transactional
+    public User update(Long id, String name) {
+        User user = findByIdOrThrow(id);
+        user.changeName(name.strip());
+        return user;
+    }
+
+    @Transactional
+    public void delete(Long id) {
+        User user = findByIdOrThrow(id);
+        userRepository.delete(user);
     }
 }

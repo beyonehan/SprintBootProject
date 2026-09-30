@@ -1,4 +1,5 @@
 package com.Shuan.spring_boot_study.controller;
+import com.Shuan.spring_boot_study.dto.UpdateUserRequest;
 import com.Shuan.spring_boot_study.model.User;
 import com.Shuan.spring_boot_study.service.UserService;
 import org.springframework.web.bind.annotation.*;
@@ -38,6 +39,20 @@ public class UserController {
    @ResponseStatus(HttpStatus.CREATED)
     public User create( @Valid @RequestBody CreateUserRequest request) {
        return  userService.create(request.name());
+   }
+
+   @PutMapping("/{id}")
+    public  User update(
+           @PathVariable Long id ,
+           @Valid @RequestBody UpdateUserRequest request
+   ) {
+       return userService.update(id, request.name());
+   }
+
+   @DeleteMapping("/{id}")
+    @ResponseStatus(HttpStatus.NO_CONTENT)
+    public void delete(@PathVariable Long id) {
+       userService.delete(id);
    }
 
 }
