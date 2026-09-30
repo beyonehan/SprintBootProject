@@ -10,6 +10,8 @@ import com.Shuan.spring_boot_study.dto.CreateUserRequest;
 import org.springframework.http.HttpStatus;
 import jakarta.validation.Valid;
 
+import com.Shuan.spring_boot_study.dto.UserResponse;
+
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
@@ -19,34 +21,30 @@ public class UserController {
    }
 
    @GetMapping
-    public List<User> findAll(){
-       return  userService.findAll();
+    public List<UserResponse> findAll() {
+       return  userService.findAll().stream()
+               .map(UserResponse::from)
+               .toList();
    }
 
    @GetMapping("/{id}")
-//    public  ResponseEntity<User> findById(@PathVariable Long id) {
-//       Optional<User> user = userService.findById(id);
-//       if (user.isPresent()) {
-//           return  ResponseEntity.ok(user.get());
-//       }
-//       return ResponseEntity.notFound().build();
-//   }
-   public  User findBy(@PathVariable Long id) {
-       return userService.findByIdOrThrow(id);
+   public  UserResponse findBy(@PathVariable Long id) {
+       return UserResponse.from(userService.findByIdOrThrow(id));
    }
 
    @PostMapping
    @ResponseStatus(HttpStatus.CREATED)
-    public User create( @Valid @RequestBody CreateUserRequest request) {
-       return  userService.create(request.name());
+    public UserResponse create( @Valid @RequestBody CreateUserRequest request) {
+
+       return  UserResponse.from(userService.create(request.name()));
    }
 
    @PutMapping("/{id}")
-    public  User update(
+    public  UserResponse update(
            @PathVariable Long id ,
            @Valid @RequestBody UpdateUserRequest request
    ) {
-       return userService.update(id, request.name());
+       return UserResponse.from(userService.update(id, request.name()));
    }
 
    @DeleteMapping("/{id}")
