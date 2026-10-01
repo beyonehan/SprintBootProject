@@ -16,8 +16,17 @@
 - [x] Task 06：学习路径参数、查询参数和 JSON 响应
 - [x] Task 07：项目分层——Controller、Service、Repository
 - [x] Task 08：接入 MySQL 与 Spring Data JPA
-- [ ] Task 09：参数校验和统一异常处理
-- [ ] Task 10：编写自动化测试
+- [x] Task 09：参数校验和统一异常处理
+- [ ] Task 10：更新和删除用户，完成 CRUD
+- [ ] Task 11：使用响应 DTO 隔离 API 和实体
+- [ ] Task 12：分页、排序和搜索
+- [ ] Task 13：编写 Service 和 Controller 自动化测试
+- [ ] Task 14：编写 Repository 集成测试
+- [ ] Task 15：使用 Flyway 管理数据库迁移
+- [ ] Task 16：多环境配置与敏感信息管理
+- [ ] Task 17：扩展用户业务模型
+- [ ] Task 18：Spring Security 与 JWT 认证
+- [ ] Task 19：Swagger、Docker 与部署
 
 ---
 
@@ -3173,6 +3182,1579 @@ String normalizedName = name.trim();
 
 我对全局异常处理的理解：
 ```
+
+---
+
+# 后续整体学习路线
+
+## 1. 当前位置
+
+目前已经完成：
+
+```text
+项目创建
+  → REST API 基础
+  → Controller、Service、Repository 分层
+  → MySQL 与 Spring Data JPA
+  → 查询和新增用户
+  → DTO 参数校验
+  → 统一异常处理
+```
+
+之前的学习内容与后续计划是连续的，不需要重做。下一步从 Task 10 继续。
+
+## 2. Task 10：更新和删除用户，完成 CRUD
+
+### 2.1 学习目标
+
+1. 使用 `PUT` 更新已存在的用户。
+2. 使用 `DELETE` 删除已存在的用户。
+3. 为更新请求创建独立 DTO，并复用 Bean Validation。
+4. 理解 `@Transactional` 的作用。
+5. 理解 JPA 脏检查。
+6. 正确使用 HTTP 200、204、400 和 404。
+
+### 2.2 什么是 CRUD
+
+CRUD 是数据操作的四个基本能力：
+
+| 缩写 | 含义 | HTTP 方法 | 当前接口 |
+|---|---|---|---|
+| C | Create，创建 | `POST` | `POST /api/users` |
+| R | Read，查询 | `GET` | `GET /api/users` |
+| U | Update，更新 | `PUT` | `PUT /api/users/{id}` |
+| D | Delete，删除 | `DELETE` | `DELETE /api/users/{id}` |
+
+前面已经完成 C 和 R，本任务完成 U 和 D。
+
+### 2.3 PUT 和 PATCH 的区别
+
+- `PUT` 通常表示使用请求中的数据更新整个资源。
+- `PATCH` 通常表示只修改资源的部分字段。
+
+当前 `User` 只有 `name` 一个可修改字段，因此本阶段先使用 `PUT`。后续扩展多个字段后再学习 `PATCH`。
+
+### 2.4 创建 UpdateUserRequest
+
+新建：
+
+```text
+src/main/java/com/Shuan/spring_boot_study/dto/UpdateUserRequest.java
+```
+
+内容：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+public record UpdateUserRequest(
+        @NotBlank(message = "用户名不能为空")
+        @Size(min = 2, max = 50, message = "用户名长度必须在2到50个字符之间")
+        String name
+) {
+}
+```
+
+不直接使用 `CreateUserRequest` 的原因是：虽然现在两个 DTO 字段相同，但创建和更新是两种不同的 API 语义。以后两者可能有不同的字段或校验规则。
+
+### 2.5 为 User 添加业务方法
+
+在 `User.java` 中加入：
+
+```java
+public void changeName(String name) {
+    this.name = name;
+}
+```
+
+放在 `getName()` 之前或之后都可以。
+
+这里使用 `changeName()` 而不是通用的 `setName()`，方法名可以更清楚地表达业务意图。
+
+### 2.6 在 Service 实现更新
+
+在 `UserService.java` 中导入：
+
+```java
+import org.springframework.transaction.annotation.Transactional;
+```
+
+添加：
+
+```java
+@Transactional
+public User update(Long id, String name) {
+    User user = findByIdOrThrow(id);
+    user.changeName(name.trim());
+    return user;
+}
+```
+
+执行流程：
+
+```text
+根据 id 查询用户
+    ↓
+用户不存在，抛出 UserNotFoundException
+    ↓
+用户存在，修改 name
+    ↓
+事务提交
+    ↓
+JPA 检测实体变化并执行 UPDATE
+```
+
+#### 为什么没有调用 save
+
+`findByIdOrThrow()` 从 Repository 查出的 `User` 在当前事务中是受 JPA 管理的实体。
+
+当执行：
+
+```java
+user.changeName(name.trim());
+```
+
+JPA 会在事务提交前比较实体状态。发现 `name` 发生变化后，自动生成 `UPDATE` SQL。这个机制叫作脏检查，因此此处不必再调用 `userRepository.save(user)`。
+
+### 2.7 在 Controller 添加 PUT 接口
+
+在 `UserController.java` 中导入：
+
+```java
+import com.Shuan.spring_boot_study.dto.UpdateUserRequest;
+```
+
+在类的最后一个右花括号之前添加：
+
+```java
+@PutMapping("/{id}")
+public User update(
+        @PathVariable Long id,
+        @Valid @RequestBody UpdateUserRequest request
+) {
+    return userService.update(id, request.name());
+}
+```
+
+请求示例：
+
+```http
+PUT /api/users/2
+Content-Type: application/json
+
+{
+  "name": "Emma Updated"
+}
+```
+
+路径中的 `2` 由 `@PathVariable Long id` 接收，JSON 请求体由 `@RequestBody UpdateUserRequest` 接收。`@Valid` 会在 Controller 方法执行前校验请求。
+
+### 2.8 测试更新接口
+
+先查询现有用户：
+
+```bash
+curl -i http://localhost:8080/api/users
+```
+
+选择一个真实存在的 ID，例如 `2`：
+
+```bash
+curl -i \
+  -X PUT \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Emma Updated"}' \
+  http://localhost:8080/api/users/2
+```
+
+预期：
+
+```http
+HTTP/1.1 200
+Content-Type: application/json
+```
+
+```json
+{
+  "id": 2,
+  "name": "Emma Updated"
+}
+```
+
+再次查询，确认数据库已更新：
+
+```bash
+curl -i http://localhost:8080/api/users/2
+```
+
+测试校验失败：
+
+```bash
+curl -i \
+  -X PUT \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"A"}' \
+  http://localhost:8080/api/users/2
+```
+
+预期 HTTP 400，并返回 `name` 字段错误。
+
+测试用户不存在：
+
+```bash
+curl -i \
+  -X PUT \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Valid Name"}' \
+  http://localhost:8080/api/users/999999
+```
+
+预期 HTTP 404，并返回统一的 `ApiError`。
+
+### 2.9 在 Service 实现删除
+
+在 `UserService.java` 中添加：
+
+```java
+@Transactional
+public void delete(Long id) {
+    User user = findByIdOrThrow(id);
+    userRepository.delete(user);
+}
+```
+
+这里先查询再删除，可以复用已有的 `UserNotFoundException`，保证删除不存在的用户时返回 HTTP 404。
+
+### 2.10 在 Controller 添加 DELETE 接口
+
+在 `UserController.java` 中添加：
+
+```java
+@DeleteMapping("/{id}")
+@ResponseStatus(HttpStatus.NO_CONTENT)
+public void delete(@PathVariable Long id) {
+    userService.delete(id);
+}
+```
+
+删除成功时返回：
+
+```http
+HTTP/1.1 204 No Content
+```
+
+204 表示请求已成功处理，但响应没有 body。因此 Controller 方法返回 `void`。
+
+### 2.11 测试删除接口
+
+为了避免误删重要数据，可以先创建一个专门用于删除的用户：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Delete Me"}' \
+  http://localhost:8080/api/users
+```
+
+记住返回的 `id`，然后执行：
+
+```bash
+curl -i \
+  -X DELETE \
+  http://localhost:8080/api/users/3
+```
+
+将示例中的 `3` 替换为刚刚创建的真实 ID。预期：
+
+```http
+HTTP/1.1 204
+```
+
+再次查询已删除用户：
+
+```bash
+curl -i http://localhost:8080/api/users/3
+```
+
+预期 HTTP 404。
+
+再次删除同一个用户：
+
+```bash
+curl -i \
+  -X DELETE \
+  http://localhost:8080/api/users/3
+```
+
+同样应返回 HTTP 404。
+
+### 2.12 检查 Maven 构建
+
+在 Maven 项目目录中执行：
+
+```bash
+cd spring-boot-study
+./mvnw test
+```
+
+如果测试和编译成功，最后会看到：
+
+```text
+BUILD SUCCESS
+```
+
+### 2.13 常见问题
+
+#### PUT 返回 405 Method Not Allowed
+
+检查：
+
+1. 是否写成 `@PutMapping("/{id}")`。
+2. `@PutMapping` 后是否有完整的方法。
+3. 修改后是否重新启动了应用。
+4. `curl` 是否使用了 `-X PUT`。
+
+#### 更新后数据库没有变化
+
+检查 Service 的 `update()` 是否有 `@Transactional`，并确认修改的是从 Repository 查询出来的受管实体。
+
+#### 空名称没有返回 400
+
+检查：
+
+1. `UpdateUserRequest` 是否有 `@NotBlank` 和 `@Size`。
+2. Controller 的 request 参数前是否有 `@Valid`。
+3. 是否导入 `jakarta.validation.Valid`。
+
+#### DELETE 成功后返回 200
+
+检查 Controller 删除方法是否添加：
+
+```java
+@ResponseStatus(HttpStatus.NO_CONTENT)
+```
+
+#### 启动时出现路由冲突
+
+确保更新和删除都使用 `/{id}`，但 HTTP 方法分别是 `PUT` 和 `DELETE`。Spring MVC 会同时使用路径和 HTTP 方法区分路由，因此两者不冲突。
+
+### 2.14 完成检查
+
+- [ ] 创建 `UpdateUserRequest`。
+- [ ] 为 `User` 添加 `changeName()`。
+- [ ] Service 实现 `update()`。
+- [ ] 更新方法使用 `@Transactional`。
+- [ ] Controller 实现 `PUT /api/users/{id}`。
+- [ ] 合法更新返回 HTTP 200。
+- [ ] 非法名称返回 HTTP 400。
+- [ ] 更新不存在用户返回 HTTP 404。
+- [ ] Service 实现 `delete()`。
+- [ ] Controller 实现 `DELETE /api/users/{id}`。
+- [ ] 删除成功返回 HTTP 204。
+- [ ] 删除不存在用户返回 HTTP 404。
+- [ ] `./mvnw test` 显示 `BUILD SUCCESS`。
+
+### 2.15 学习记录
+
+```text
+完成日期：
+
+PUT 正常响应：
+
+PUT 参数校验响应：
+
+PUT 用户不存在响应：
+
+DELETE 正常响应：
+
+DELETE 用户不存在响应：
+
+我对 @Transactional 的理解：
+
+我对 JPA 脏检查的理解：
+
+遇到的问题：
+
+解决方法：
+```
+
+## 3. Task 11：响应 DTO
+
+### 3.1 学习目标
+
+1. 不再从 Controller 直接返回 JPA 实体。
+2. 使用 `UserResponse` 定义稳定的 API 响应结构。
+3. 学习 Entity、Request DTO 和 Response DTO 的职责边界。
+
+### 3.2 当前问题
+
+当前 Controller 直接返回 `User`。这会让数据库模型和 API 绑定在一起，将来给实体增加密码等字段时，还可能意外返回敏感信息。
+
+### 3.3 创建 UserResponse
+
+新建 `dto/UserResponse.java`：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import com.Shuan.spring_boot_study.model.User;
+
+public record UserResponse(Long id, String name) {
+
+    public static UserResponse from(User user) {
+        return new UserResponse(user.getId(), user.getName());
+    }
+}
+```
+
+`from()` 负责将 Entity 转换为 Response DTO。
+
+### 3.4 修改 Controller
+
+导入：
+
+```java
+import com.Shuan.spring_boot_study.dto.UserResponse;
+```
+
+将查询全部的返回值改为：
+
+```java
+@GetMapping
+public List<UserResponse> findAll() {
+    return userService.findAll().stream()
+            .map(UserResponse::from)
+            .toList();
+}
+```
+
+将单个查询改为：
+
+```java
+@GetMapping("/{id}")
+public UserResponse findById(@PathVariable Long id) {
+    return UserResponse.from(userService.findByIdOrThrow(id));
+}
+```
+
+将创建和更新的返回值也改为 `UserResponse`：
+
+```java
+@PostMapping
+@ResponseStatus(HttpStatus.CREATED)
+public UserResponse create(@Valid @RequestBody CreateUserRequest request) {
+    return UserResponse.from(userService.create(request.name()));
+}
+
+@PutMapping("/{id}")
+public UserResponse update(
+        @PathVariable Long id,
+        @Valid @RequestBody UpdateUserRequest request
+) {
+    return UserResponse.from(userService.update(id, request.name()));
+}
+```
+
+Service 和 Repository 仍然可以使用 `User`，转换发生在 API 边界。
+
+### 3.5 验证
+
+```bash
+curl -i http://localhost:8080/api/users
+curl -i http://localhost:8080/api/users/1
+```
+
+确认 JSON 仍只有：
+
+```json
+{
+  "id": 1,
+  "name": "Alice"
+}
+```
+
+### 3.6 完成检查
+
+- [ ] 创建 `UserResponse`。
+- [ ] 所有用户接口不再直接返回 `User`。
+- [ ] POST 仍返回 HTTP 201。
+- [ ] GET、POST 和 PUT 的 JSON 结构正确。
+- [ ] `./mvnw test` 通过。
+
+## 4. Task 12：分页、排序和搜索
+
+### 4.1 学习目标
+
+1. 使用 `Pageable` 接收分页参数。
+2. 使用 `Page<T>` 返回分页结果。
+3. 使用 Spring Data 方法名查询实现模糊搜索。
+
+### 4.2 修改 Repository
+
+在 `UserRepository` 中添加：
+
+```java
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
+Page<User> findByNameContainingIgnoreCase(String name, Pageable pageable);
+```
+
+Spring Data JPA 会根据方法名生成不区分大小写的名称模糊查询。
+
+### 4.3 修改 Service
+
+```java
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
+public Page<User> findAll(Pageable pageable) {
+    return userRepository.findAll(pageable);
+}
+
+public Page<User> searchByName(String name, Pageable pageable) {
+    return userRepository.findByNameContainingIgnoreCase(name, pageable);
+}
+```
+
+删除或替换原来的无参 `findAll()`，避免同时保留两套不一致的查询方式。
+
+### 4.4 修改 Controller
+
+```java
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
+@GetMapping
+public Page<UserResponse> findAll(Pageable pageable) {
+    return userService.findAll(pageable).map(UserResponse::from);
+}
+
+@GetMapping("/search")
+public Page<UserResponse> search(
+        @RequestParam String name,
+        Pageable pageable
+) {
+    return userService.searchByName(name, pageable)
+            .map(UserResponse::from);
+}
+```
+
+`/search` 要放在概念上清晰的独立路由中，避免把 `search` 当成用户 ID。
+
+### 4.5 验证
+
+```http
+GET /api/users?page=0&size=10&sort=name,asc
+GET /api/users/search?name=Emma
+```
+
+使用 `curl`：
+
+```bash
+curl -i 'http://localhost:8080/api/users?page=0&size=2&sort=name,asc'
+curl -i 'http://localhost:8080/api/users/search?name=em&page=0&size=10'
+```
+
+注意 URL 含 `&` 时要使用引号，否则 shell 会把 `&` 当成后台执行符号。
+
+### 4.6 完成检查
+
+- [ ] 普通列表接口支持 `page`、`size` 和 `sort`。
+- [ ] 搜索接口支持名称模糊查询。
+- [ ] 搜索不区分大小写。
+- [ ] 响应包含总页数和总记录数。
+- [ ] `./mvnw test` 通过。
+
+## 5. Task 13：Service 和 Controller 自动化测试
+
+### 5.1 Service 单元测试
+
+新建 `UserServiceTest.java`，使用 Mockito，不启动 Spring 和 MySQL：
+
+```java
+@ExtendWith(MockitoExtension.class)
+class UserServiceTest {
+
+    @Mock
+    private UserRepository userRepository;
+
+    @InjectMocks
+    private UserService userService;
+
+    @Test
+    void findByIdOrThrowReturnsUserWhenFound() {
+        User user = new User("Emma");
+        when(userRepository.findById(1L)).thenReturn(Optional.of(user));
+
+        User result = userService.findByIdOrThrow(1L);
+
+        assertSame(user, result);
+    }
+
+    @Test
+    void findByIdOrThrowThrowsWhenMissing() {
+        when(userRepository.findById(999L)).thenReturn(Optional.empty());
+
+        assertThrows(
+                UserNotFoundException.class,
+                () -> userService.findByIdOrThrow(999L)
+        );
+    }
+}
+```
+
+需要导入 JUnit、Mockito、`Optional` 和项目中的类。IDEA 可以使用 `Option + Enter` 自动导入。
+
+### 5.2 Controller 测试
+
+使用 MockMvc 发送模拟 HTTP 请求，将 `UserService` 替换为 mock。MockMvc 只用于测试，不写在 Controller 生产代码中。
+
+#### 第一步：创建测试目录和文件
+
+新建：
+
+```text
+src/test/java/com/Shuan/spring_boot_study/UserControllerTest.java
+```
+
+完整目录结构：
+
+```text
+spring-boot-study/
+└── src/
+    ├── main/java/com/Shuan/spring_boot_study/controller/
+    │   └── UserController.java
+    └── test/java/com/Shuan/spring_boot_study/
+        └── UserControllerTest.java
+```
+
+#### 第二步：编写第一个 MockMvc 测试
+
+```java
+package com.Shuan.spring_boot_study;
+
+import com.Shuan.spring_boot_study.controller.UserController;
+import com.Shuan.spring_boot_study.service.UserService;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.webmvc.test.autoconfigure.WebMvcTest;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+
+import static org.mockito.Mockito.verify;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+@WebMvcTest(UserController.class)
+class UserControllerTest {
+
+    @Autowired
+    private MockMvc mockMvc;
+
+    @MockitoBean
+    private UserService userService;
+
+    @Test
+    void deleteReturns204() throws Exception {
+        mockMvc.perform(delete("/api/users/1"))
+                .andExpect(status().isNoContent());
+
+        verify(userService).delete(1L);
+    }
+}
+```
+
+Spring Boot 4 使用：
+
+```java
+@MockitoBean
+```
+
+网上的旧教程可能使用 `@MockBean`。当前项目应使用 `org.springframework.test.context.bean.override.mockito.MockitoBean`。
+
+#### 第三步：理解测试类
+
+`@WebMvcTest(UserController.class)` 只加载 Web 层相关组件，不启动完整业务和数据库环境。
+
+`MockMvc` 在测试进程内模拟 HTTP 请求，不会真正监听 8080 端口。
+
+`@MockitoBean` 在 Spring 测试容器中放入一个模拟 `UserService`，用它注入 `UserController`，因此不会调用真实 Repository 或 MySQL。
+
+`verify(userService).delete(1L)` 用来验证 Controller 确实把路径参数 `1` 传给了 Service。
+
+#### 第四步：测试 PUT 参数校验
+
+在同一个 `UserControllerTest` 中增加 static import：
+
+```java
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+```
+
+导入：
+
+```java
+import org.springframework.http.MediaType;
+```
+
+然后增加测试方法：
+
+```java
+@Test
+void updateReturns400WhenNameIsTooShort() throws Exception {
+    mockMvc.perform(put("/api/users/1")
+            .contentType(MediaType.APPLICATION_JSON)
+            .content("""
+                    {"name":"A"}
+                    """))
+            .andExpect(status().isBadRequest())
+            .andExpect(jsonPath("$.fieldError.name").exists());
+
+    verifyNoInteractions(userService);
+}
+```
+
+`verifyNoInteractions()` 证明参数在 Controller 入口就被拒绝，没有进入 Service。
+
+#### 第五步：测试 404 异常响应
+
+增加导入：
+
+```java
+import com.Shuan.spring_boot_study.exception.UserNotFoundException;
+
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+```
+
+增加测试：
+
+```java
+@Test
+void findByIdReturns404WhenUserDoesNotExist() throws Exception {
+    when(userService.findByIdOrThrow(999L))
+            .thenThrow(new UserNotFoundException(999L));
+
+    mockMvc.perform(get("/api/users/999"))
+            .andExpect(status().isNotFound())
+            .andExpect(jsonPath("$.status").value(404))
+            .andExpect(jsonPath("$.message").exists())
+            .andExpect(jsonPath("$.path").value("/api/users/999"));
+}
+```
+
+如果 `GlobalExceptionHandler` 没有被测试自动加载，在测试类上增加：
+
+```java
+@Import(GlobalExceptionHandler.class)
+```
+
+并导入：
+
+```java
+import com.Shuan.spring_boot_study.exception.GlobalExceptionHandler;
+import org.springframework.context.annotation.Import;
+```
+
+#### 后续要覆盖的 Controller 场景
+
+- 正常创建、查询、更新和删除
+- 参数校验返回 HTTP 400
+- 用户不存在返回 HTTP 404
+- 删除成功返回 HTTP 204
+
+### 5.3 执行测试
+
+```bash
+./mvnw test
+```
+
+单独执行某个测试类：
+
+```bash
+./mvnw -Dtest=UserServiceTest test
+./mvnw -Dtest=UserControllerTest test
+```
+
+### 5.4 完成检查
+
+- [ ] Service 测试不依赖 Spring 容器或 MySQL。
+- [ ] Controller 测试不连接真实数据库。
+- [ ] 200、201、204、400 和 404 都有覆盖。
+- [ ] 测试名能说明业务场景。
+
+## 6. Task 14：Repository 集成测试
+
+### 6.1 添加 H2 测试数据库
+
+在 Spring Boot 4 中，JPA 测试支持是独立 starter。在 `pom.xml` 添加 JPA 测试 starter 和 H2：
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-data-jpa-test</artifactId>
+    <scope>test</scope>
+</dependency>
+
+<dependency>
+    <groupId>com.h2database</groupId>
+    <artifactId>h2</artifactId>
+    <scope>test</scope>
+</dependency>
+```
+
+这样测试不依赖本机 MySQL 和 `DB_PASSWORD`。
+
+### 6.2 创建测试配置
+
+新建 `src/test/resources/application.properties`：
+
+```properties
+spring.datasource.url=jdbc:h2:mem:testdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.open-in-view=false
+```
+
+### 6.3 编写 Repository 测试
+
+Spring Boot 4 中 `DataJpaTest` 的 import 是：
+
+```java
+import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+```
+
+不要照搬 Spring Boot 3 教程中的旧包路径。
+
+```java
+@DataJpaTest
+class UserRepositoryTests {
+
+    @Autowired
+    private UserRepository userRepository;
+
+    @Test
+    void searchesNameIgnoringCase() {
+        userRepository.save(new User("Emma"));
+        userRepository.save(new User("Bob"));
+
+        Page<User> result = userRepository.findByNameContainingIgnoreCase(
+                "EM",
+                PageRequest.of(0, 10)
+        );
+
+        assertEquals(1, result.getTotalElements());
+        assertEquals("Emma", result.getContent().getFirst().getName());
+    }
+}
+```
+
+### 6.4 完成检查
+
+- [ ] 添加 `spring-boot-starter-data-jpa-test`。
+- [ ] H2 仅作为 test 依赖。
+- [ ] `./mvnw test` 不需要本机 MySQL 密码。
+- [ ] Repository 模糊查询有集成测试。
+- [ ] 每个测试之间数据相互隔离。
+
+## 7. Task 15：Flyway 数据库迁移
+
+### 7.1 学习目标
+
+1. 不再依赖 Hibernate 自动修改表结构。
+2. 使用可追踪的 SQL 迁移文件管理数据库版本。
+3. 理解 Flyway 的版本、顺序和 checksum。
+
+### 7.2 添加依赖
+
+在 `pom.xml` 添加：
+
+```xml
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-core</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.flywaydb</groupId>
+    <artifactId>flyway-mysql</artifactId>
+</dependency>
+```
+
+### 7.3 创建第一个迁移
+
+新建：
+
+```text
+src/main/resources/db/migration/V1__create_users_table.sql
+```
+
+内容：
+
+```sql
+CREATE TABLE app_users (
+    id BIGINT NOT NULL AUTO_INCREMENT,
+    name VARCHAR(50) NOT NULL,
+    PRIMARY KEY (id)
+);
+```
+
+如果当前数据库已经由 Hibernate 创建表，学习阶段可先备份数据，然后使用空数据库练习 Flyway，避免 `table already exists`。
+
+### 7.4 关闭 Hibernate 建表
+
+将：
+
+```properties
+spring.jpa.hibernate.ddl-auto=update
+```
+
+改为：
+
+```properties
+spring.jpa.hibernate.ddl-auto=validate
+```
+
+Flyway 负责修改表结构，Hibernate 只验证 Entity 与表是否一致。
+
+### 7.5 创建第二个迁移
+
+```text
+src/main/resources/db/migration/V2__add_email_to_users.sql
+```
+
+```sql
+ALTER TABLE app_users
+    ADD COLUMN email VARCHAR(255) NULL;
+```
+
+已经执行过的迁移不要直接修改，应通过新的 `V3__...sql` 继续演进。
+
+### 7.6 验证
+
+```bash
+./mvnw spring-boot:run
+```
+
+进入 MySQL 后检查：
+
+```sql
+SHOW TABLES;
+SELECT * FROM flyway_schema_history ORDER BY installed_rank;
+DESCRIBE app_users;
+```
+
+### 7.7 已有数据库接入 Flyway
+
+本项目的 `app_users` 在引入 Flyway 之前已经由 Hibernate 创建，并且已有用户数据。如果直接执行 `V1__create_users_table.sql`，会与现有表冲突。
+
+为了保留现有数据，在 `application.properties` 中使用：
+
+```properties
+spring.flyway.baseline-on-migrate=true
+spring.flyway.baseline-version=1
+```
+
+首次启动时，Flyway 会：
+
+1. 发现数据库中已经存在业务表。
+2. 创建 `flyway_schema_history`。
+3. 将现有数据库标记为基线版本 1。
+4. 不再执行 V1 创建表。
+5. 从 V2 开始执行后续迁移。
+
+基线配置用于“已有数据库首次接入 Flyway”。从空数据库开始的新项目不需要这个过渡步骤。
+
+### 7.8 实际问题：SQL 执行位置错误
+
+本次在 zsh 提示符下直接执行了：
+
+```text
+➜  ~ SHOW TABLES;
+```
+
+导致：
+
+```text
+zsh: command not found: SHOW
+```
+
+`SHOW`、`SELECT` 和 `DESCRIBE` 是 SQL，必须在 `mysql>` 提示符下执行。
+
+先在 zsh 中登录：
+
+```bash
+mysql -h 127.0.0.1 -u spring_user -p spring_boot_study
+```
+
+看到：
+
+```text
+mysql>
+```
+
+再执行：
+
+```sql
+SHOW TABLES;
+SELECT * FROM flyway_schema_history ORDER BY installed_rank;
+DESCRIBE app_users;
+```
+
+也可以在 zsh 中通过 MySQL 客户端的 `-e` 参数执行：
+
+```bash
+mysql -h 127.0.0.1 -u spring_user -p spring_boot_study \
+  -e 'SHOW TABLES; DESCRIBE app_users;'
+```
+
+### 7.9 实际问题：使用了错误的 MySQL 账户
+
+执行：
+
+```bash
+mysql -u root -p
+```
+
+返回：
+
+```text
+Access denied for user 'root'@'localhost'
+```
+
+这表示当前输入的 root 密码不正确，不代表 MySQL 服务已损坏。项目本来使用的是 `spring_user`，因此应使用项目账户登录目标数据库：
+
+```bash
+mysql -h 127.0.0.1 -u spring_user -p spring_boot_study
+```
+
+直接执行 `mysql` 时，MySQL 客户端默认尝试使用当前 macOS 用户名 `hanli` 且不使用密码，因此也会被 MySQL 拒绝。
+
+### 7.10 实际问题：Flyway 没有发现迁移文件
+
+错误文件位置和名称：
+
+```text
+src/main/resources/V1_create_users_table.sql
+src/main/resources/V2_add_email_to_users.sql
+```
+
+正确写法：
+
+```text
+src/main/resources/db/migration/V1__create_users_table.sql
+src/main/resources/db/migration/V2__add_email_to_users.sql
+```
+
+注意：
+
+1. 默认扫描目录是 `classpath:db/migration`。
+2. 版本号和描述之间是两个下划线 `__`。
+3. SQL 语句末尾应有分号。
+4. 只有在应用成功启动并运行 Flyway 后，`flyway_schema_history` 才会出现。
+
+### 7.11 学习问答
+
+#### 问题 1：为什么项目一开始不使用 Flyway？
+
+因为项目刚开始时，学习重点是 Spring Boot、JPA 和 CRUD，而不是数据库版本管理。
+
+最初使用：
+
+```properties
+spring.jpa.hibernate.ddl-auto=update
+```
+
+Hibernate 会根据 Entity 自动创建或修改表，好处是配置简单，可以先集中学习：
+
+- Controller、Service 和 Repository 分层
+- JPA Entity 映射
+- CRUD
+- 参数校验和异常处理
+
+如果一开始就使用 Flyway，还要同时理解 SQL 建表、迁移版本、checksum、baseline 和 Entity 与表结构同步，初期负担较大。
+
+当 CRUD 和 JPA 已经跑通后，再引入 Flyway，学习重点就从“快速建表”转为“可追踪地演进数据库”。
+
+```text
+学习初期：Hibernate update 快速建表
+        ↓
+CRUD 和 JPA 完成
+        ↓
+工程化阶段：Flyway 管理表结构
+```
+
+在真实的新生产项目中，通常建议从开始就使用 Flyway。本项目中途引入，是为了采用渐进式学习顺序。
+
+#### 问题 2：“不再依赖 Hibernate 自动修改表结构”怎么理解？
+
+它的意思是：
+
+> Java Entity 发生变化后，Hibernate 不再自动修改 MySQL 表；所有数据库结构变化都必须通过 Flyway SQL 明确完成。
+
+以前的配置：
+
+```properties
+spring.jpa.hibernate.ddl-auto=update
+```
+
+如果在 `User` 中增加：
+
+```java
+private String email;
+```
+
+Hibernate 启动时可能自动执行类似的 SQL：
+
+```sql
+ALTER TABLE app_users ADD COLUMN email VARCHAR(255);
+```
+
+流程是：
+
+```text
+修改 Entity
+    ↓
+启动应用
+    ↓
+Hibernate 自动修改表
+```
+
+引入 Flyway 后使用：
+
+```properties
+spring.jpa.hibernate.ddl-auto=validate
+```
+
+`validate` 只检查映射，不会执行 `CREATE TABLE` 或 `ALTER TABLE`。添加 `email` 时，必须同时：
+
+1. 创建 Flyway 迁移：
+
+```sql
+ALTER TABLE app_users
+    ADD COLUMN email VARCHAR(255) NULL;
+```
+
+2. 修改 Java Entity：
+
+```java
+private String email;
+```
+
+启动流程变为：
+
+```text
+Flyway 执行新版本 SQL
+    ↓
+MySQL 表结构发生变化
+    ↓
+Hibernate 验证 Entity 和表结构
+    ↓
+一致：继续启动
+不一致：启动失败
+```
+
+职责分工：
+
+| 组件 | 职责 |
+|---|---|
+| Flyway | 创建和修改数据库结构 |
+| Hibernate / JPA | 将 Java 对象映射为数据库记录 |
+| `ddl-auto=validate` | 检查 Entity 和数据库结构是否匹配 |
+
+如果只修改 Entity，但没有新增 Flyway 迁移，Hibernate 会在启动时报错，而不是自动补字段。
+
+以后修改数据库的正确流程：
+
+```text
+1. 设计数据库变化
+2. 创建新的 Flyway SQL
+3. 修改对应 Entity
+4. 更新 DTO 和业务代码
+5. 启动应用执行迁移
+6. Hibernate 验证映射
+7. 运行测试
+8. SQL 和 Java 代码一起提交
+```
+
+核心记忆：
+
+```text
+update   = Hibernate 帮我改表
+validate = Flyway 改表，Hibernate 只检查
+```
+
+### 7.12 完成检查
+
+- [ ] Flyway 依赖加载成功。
+- [ ] `V1` 能创建 `app_users`。
+- [ ] `V2` 能添加字段。
+- [ ] `ddl-auto` 使用 `validate`。
+- [ ] 理解为什么不应修改已执行过的迁移。
+
+## 8. Task 16：多环境配置与敏感信息
+
+### 8.1 拆分配置
+
+`application.properties` 保留公共配置：
+
+```properties
+spring.application.name=spring-boot-study
+spring.jpa.open-in-view=false
+```
+
+`application-dev.properties` 放本地开发配置：
+
+```properties
+spring.datasource.url=jdbc:mysql://localhost:3306/spring_boot_study?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+spring.datasource.username=${DB_USERNAME:spring_user}
+spring.datasource.password=${DB_PASSWORD}
+spring.jpa.show-sql=true
+```
+
+`src/test/resources/application-test.properties` 放测试配置：
+
+```text
+spring.datasource.url=jdbc:h2:mem:testdb
+spring.datasource.username=sa
+spring.datasource.password=
+```
+
+测试类使用：
+
+```java
+@ActiveProfiles("test")
+```
+
+### 8.2 启动开发环境
+
+```bash
+read -s "DB_PASSWORD?MySQL password: "
+export DB_PASSWORD
+echo
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+`export` 使 Maven 和 Java 子进程能读到 `DB_PASSWORD`。只执行 `read` 而不 `export` 时，Spring Boot 子进程无法获取该变量。
+
+### 8.3 生产配置原则
+
+`application-prod.properties` 只引用环境变量：
+
+```properties
+spring.datasource.url=${DB_URL}
+spring.datasource.username=${DB_USERNAME}
+spring.datasource.password=${DB_PASSWORD}
+spring.jpa.show-sql=false
+```
+
+不要向 Git 提交真实密码、JWT 密钥或云服务凭据。
+
+### 8.4 完成检查
+
+- [ ] dev、test 和 prod 配置分离。
+- [ ] 测试不依赖本地 MySQL。
+- [ ] Git 中没有数据库密码。
+- [ ] 能解释 shell 变量和已导出环境变量的区别。
+
+## 9. Task 17：扩展真实业务
+
+### 9.1 扩展 User
+
+添加：
+
+```java
+@Column(nullable = false, unique = true)
+private String email;
+
+@Enumerated(EnumType.STRING)
+@Column(nullable = false)
+private UserStatus status = UserStatus.ACTIVE;
+
+@CreationTimestamp
+private Instant createdAt;
+
+@UpdateTimestamp
+private Instant updatedAt;
+```
+
+状态枚举：
+
+```java
+public enum UserStatus {
+    ACTIVE,
+    DISABLED
+}
+```
+
+同步更新 Flyway SQL，不要只改 Entity。
+
+### 9.2 扩展 DTO
+
+`CreateUserRequest` 添加：
+
+```java
+@NotBlank(message = "邮箱不能为空")
+@Email(message = "邮箱格式不正确")
+String email
+```
+
+`UserResponse` 添加 `email`、`status`、`createdAt` 和 `updatedAt`。
+
+### 9.3 唯一性检查
+
+Repository 添加：
+
+```java
+boolean existsByEmailIgnoreCase(String email);
+```
+
+Service 创建用户前检查：
+
+```java
+if (userRepository.existsByEmailIgnoreCase(email)) {
+    throw new DuplicateEmailException(email);
+}
+```
+
+`GlobalExceptionHandler` 将 `DuplicateEmailException` 转换为 HTTP 409 Conflict。应同时保留数据库唯一约束，防止并发请求绕过业务检查。
+
+### 9.4 PATCH 部分更新
+
+创建 `PatchUserRequest`，字段允许为 `null`，Service 只更新客户端实际提供的字段：
+
+```java
+if (request.name() != null) {
+    user.changeName(request.name().trim());
+}
+if (request.email() != null) {
+    user.changeEmail(request.email().trim().toLowerCase());
+}
+```
+
+Controller 路由：
+
+```java
+@PatchMapping("/{id}")
+```
+
+### 9.5 验证
+
+```bash
+curl -i \
+  -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"New Name"}' \
+  http://localhost:8080/api/users/1
+```
+
+还要测试邮箱重复返回 409，以及邮箱格式错误返回 400。
+
+### 9.6 完成检查
+
+- [ ] Entity、DTO 和 Flyway 迁移保持一致。
+- [ ] 邮箱同时有业务检查和数据库唯一约束。
+- [ ] 重复邮箱返回 HTTP 409。
+- [ ] PATCH 不会清空未提供的字段。
+- [ ] 新增功能有自动化测试。
+
+## 10. Task 18：认证与权限
+
+### 10.1 实现顺序
+
+Spring Security 内容较多，按以下顺序实现：
+
+1. 添加 Spring Security，先理解默认保护。
+2. 使用 `PasswordEncoder` 存储密码哈希。
+3. 实现 `/api/auth/register` 和 `/api/auth/login`。
+4. 签发并验证 JWT。
+5. 添加 `USER` 和 `ADMIN` 角色。
+6. 编写 401 和 403 测试。
+
+### 10.2 添加依赖
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-security</artifactId>
+</dependency>
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-oauth2-resource-server</artifactId>
+</dependency>
+```
+
+### 10.3 密码存储
+
+User 增加 `passwordHash`，不保存明文密码，也不在 `UserResponse` 中返回。
+
+```java
+@Bean
+PasswordEncoder passwordEncoder() {
+    return new BCryptPasswordEncoder();
+}
+```
+
+注册时：
+
+```java
+String passwordHash = passwordEncoder.encode(request.password());
+```
+
+登录时使用 `passwordEncoder.matches()` 验证，不要自己比较密码字符串。
+
+### 10.4 安全规则
+
+SecurityFilterChain 的目标规则：
+
+```text
+POST /api/auth/register       允许匿名
+POST /api/auth/login          允许匿名
+GET  /api/users/**            USER 或 ADMIN
+POST/PUT/PATCH/DELETE users   ADMIN
+```
+
+REST API 使用无状态会话，JWT 通过请求头传递：
+
+```http
+Authorization: Bearer <token>
+```
+
+JWT 签名密钥必须使用环境变量或密钥管理服务，不提交到 Git。
+
+### 10.5 验证
+
+```bash
+# 不携带 token，预期 401
+curl -i http://localhost:8080/api/users
+
+# 携带有效 token
+curl -i \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  http://localhost:8080/api/users
+```
+
+401 表示未认证或 token 无效；403 表示已认证，但权限不足。
+
+### 10.6 完成检查
+
+- [ ] 数据库中不存储明文密码。
+- [ ] 注册和登录允许匿名访问。
+- [ ] 受保护接口没有 token 时返回 401。
+- [ ] USER 访问 ADMIN 功能时返回 403。
+- [ ] JWT 过期和签名错误都有测试。
+
+## 11. Task 19：文档、监控、Docker 与 CI
+
+### 11.1 OpenAPI / Swagger
+
+添加与当前 Spring Boot 主版本兼容的 springdoc 依赖，启动后检查：
+
+```text
+/v3/api-docs
+/swagger-ui/index.html
+```
+
+为请求 DTO 和主要 Controller 添加说明，确保 400、401、403、404 和 409 也出现在 API 文档中。
+
+### 11.2 Actuator
+
+```xml
+<dependency>
+    <groupId>org.springframework.boot</groupId>
+    <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+```
+
+只暴露必要端点：
+
+```properties
+management.endpoints.web.exposure.include=health,info
+management.endpoint.health.show-details=never
+```
+
+验证：
+
+```bash
+curl -i http://localhost:8080/actuator/health
+```
+
+### 11.3 Dockerfile
+
+```dockerfile
+FROM eclipse-temurin:25-jre
+WORKDIR /app
+COPY target/spring-boot-study-0.0.1-SNAPSHOT.jar app.jar
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "app.jar"]
+```
+
+先构建 Jar，再构建镜像：
+
+```bash
+./mvnw clean package
+docker build -t spring-boot-study .
+```
+
+### 11.4 Docker Compose
+
+Compose 至少包含 `app` 和 `mysql` 两个服务。应用内的数据库地址使用服务名：
+
+```text
+jdbc:mysql://mysql:3306/spring_boot_study
+```
+
+容器内的 `localhost` 指向当前容器，不是 MySQL 容器。密码通过环境变量提供。
+
+```bash
+docker compose up --build
+docker compose ps
+curl -i http://localhost:8080/actuator/health
+```
+
+### 11.5 CI
+
+GitHub Actions 的基本步骤：
+
+```yaml
+- uses: actions/checkout@v4
+- uses: actions/setup-java@v4
+  with:
+    distribution: temurin
+    java-version: '25'
+    cache: maven
+- run: ./mvnw verify
+  working-directory: spring-boot-study
+```
+
+CI 使用 H2 或临时 MySQL service container，不能依赖开发者本机数据库。
+
+### 11.6 完成检查
+
+- [ ] Swagger UI 可访问，且接口信息正确。
+- [ ] `/actuator/health` 返回 UP。
+- [ ] Docker 镜像能独立启动。
+- [ ] Compose 能同时启动应用和 MySQL。
+- [ ] GitHub Actions 能自动执行 `./mvnw verify`。
+- [ ] 日志和仓库中没有敏感信息。
+
+## 12. 每一课的执行方式
+
+从 Task 10 开始，每一课按以下流程进行：
+
+1. 说明学习目标和知识点。
+2. 由学习者编写或补全实际代码。
+3. 将完整操作、原理和问题记录到本文档。
+4. 运行 Maven 测试或使用 `curl` 验证接口。
+5. 查看 `git diff` 和 `git status`。
+6. 确认无误后再由学习者提交并推送 Git。
 
 ---
 

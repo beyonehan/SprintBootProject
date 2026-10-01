@@ -1,0 +1,2 @@
+ALTER TABLE app_users
+    ADD COLUMN email VARCHAR(255) NULL;
