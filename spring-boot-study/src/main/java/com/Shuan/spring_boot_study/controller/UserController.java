@@ -12,6 +12,9 @@ import jakarta.validation.Valid;
 
 import com.Shuan.spring_boot_study.dto.UserResponse;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+
 @RestController
 @RequestMapping("/api/users")
 public class UserController {
@@ -20,12 +23,12 @@ public class UserController {
        this.userService = userService;
    }
 
-   @GetMapping
-    public List<UserResponse> findAll() {
-       return  userService.findAll().stream()
-               .map(UserResponse::from)
-               .toList();
-   }
+//   @GetMapping
+//    public List<UserResponse> findAll() {
+//       return  userService.findAll().stream()
+//               .map(UserResponse::from)
+//               .toList();
+//   }
 
    @GetMapping("/{id}")
    public  UserResponse findBy(@PathVariable Long id) {
@@ -53,4 +56,16 @@ public class UserController {
        userService.delete(id);
    }
 
+   @GetMapping
+    public  Page<UserResponse> findAll(Pageable pageable) {
+       return userService.findAll(pageable).map(UserResponse::from);
+   }
+
+   @GetMapping("/search")
+    public Page<UserResponse> search(
+            @RequestParam String name,
+            Pageable pageable
+   ) {
+       return  userService.searchByName(name, pageable).map(UserResponse::from);
+   }
 }

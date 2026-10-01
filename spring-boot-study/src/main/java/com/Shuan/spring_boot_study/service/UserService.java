@@ -9,6 +9,8 @@ import org.springframework.stereotype.Service;
 import java.util.List;
 import java.util.Optional;
 
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
 
 @Service
 public class UserService {
@@ -17,9 +19,17 @@ public class UserService {
         this.userRepository = userRepository;
     }
 
-    public List<User> findAll() {
-        return this.userRepository.findAll();
+//    public List<User> findAll() {
+//        return this.userRepository.findAll();
+//    }
+
+    public  Page<User> findAll(Pageable pageable) {
+        return userRepository.findAll(pageable);
     }
+    public  Page<User> searchByName(String name , Pageable pageable) {
+        return userRepository.findByNameContainingIgnoreCase(name, pageable);
+    }
+
     public Optional<User> findById(long id) {
         return  userRepository.findById(id);
     }
