@@ -4457,7 +4457,161 @@ spring.jpa.show-sql=false
 
 不要向 Git 提交真实密码、JWT 密钥或云服务凭据。
 
-### 8.4 完成检查
+### 8.4 学习问答：只能通过命令行选择 dev 或 prod 吗？
+
+不是。Spring Profile 可以通过命令行、环境变量、JVM 参数或 IntelliJ IDEA Run Configuration 选择。
+
+当激活 `dev` 时，Spring Boot 会合并：
+
+```text
+application.properties
+        +
+application-dev.properties
+```
+
+当激活 `prod` 时，Spring Boot 会合并：
+
+```text
+application.properties
+        +
+application-prod.properties
+```
+
+后加载的 Profile 配置会覆盖公共配置中的同名属性。Profile 名称必须与文件名一致：当文件是 `application-prod.properties` 时，应激活 `prod`，不是 `product`。
+
+#### 在 IntelliJ IDEA 中配置 dev
+
+1. 打开 `Run` → `Edit Configurations...`。
+2. 选择当前的 `SpringBootStudyApplication` 运行配置。
+3. 将配置名修改为 `SpringBootStudyApplication-dev`。
+4. 如果页面没有 `Active profiles`，点击 `Modify options`，启用 Spring Boot 的 Active Profiles 选项。
+5. 在 `Active profiles` 中输入 `dev`。
+6. 在 `Environment variables` 中添加 `DB_PASSWORD=开发数据库密码`。
+7. 点击 `Apply` 和 `Run`。
+
+启动日志应出现：
+
+```text
+The following 1 profile is active: "dev"
+```
+
+IDEA 的运行配置通常保存在本地 `.idea/workspace.xml` 中。确保 `.idea/` 不被提交，避免意外上传密码。
+
+#### 在 IntelliJ IDEA 中配置 prod
+
+1. 复制 dev 运行配置。
+2. 命名为 `SpringBootStudyApplication-prod`。
+3. 将 `Active profiles` 改为 `prod`。
+4. 在 `Environment variables` 中配置 `DB_URL`、`DB_USERNAME` 和 `DB_PASSWORD`。
+
+本地学习时一般只运行 dev。prod 配置用于生产环境，不要为了测试而随意连接真实生产数据库。
+
+#### IDEA 中没有 Active profiles 输入框
+
+可以使用以下任意一种备选方式。
+
+Program arguments：
+
+```text
+--spring.profiles.active=dev
+```
+
+VM options：
+
+```text
+-Dspring.profiles.active=dev
+```
+
+Environment variables：
+
+```text
+SPRING_PROFILES_ACTIVE=dev
+```
+
+只需选择一种方式，不必同时配置。
+
+### 8.5 本次配置检查结果
+
+第二次检查时，以下内容已经正确：
+
+- `application.properties` 已只保留公共配置。
+- MySQL URL、开发账户和 `show-sql=true` 已移入 `application-dev.properties`。
+- Flyway baseline 过渡配置已移入 dev。
+- `application-prod.properties` 通过环境变量读取数据库配置。
+- 重复的 `src/test/resources/application.properties` 已删除。
+
+仍需修正：
+
+1. `application-test.properties` 仍然连接 MySQL，应改为 H2。
+2. `SpringBootStudyApplicationTests` 和 `UserRepositoryTests` 仍未添加 `@ActiveProfiles("test")`。
+
+此时执行 `./mvnw test` 会失败：
+
+```text
+Schema validation: missing table [app_users]
+```
+
+原因是：
+
+```text
+没有激活 test Profile
+    ↓
+application-test.properties 没有加载
+    ↓
+H2 是空数据库
+    ↓
+继承公共 ddl-auto=validate
+    ↓
+Hibernate 只检查，不建表
+    ↓
+报 missing table [app_users]
+```
+
+`application-test.properties` 应改为：
+
+```properties
+spring.datasource.url=jdbc:h2:mem:testdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.open-in-view=false
+spring.flyway.enabled=false
+```
+
+在需要数据库的测试类上添加：
+
+```java
+import org.springframework.test.context.ActiveProfiles;
+
+@ActiveProfiles("test")
+```
+
+第三次检查时，上述 H2 配置和 `@ActiveProfiles("test")` 已添加正确，完整测试结果为：
+
+```text
+Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+BUILD SUCCESS
+```
+
+测试日志显示：
+
+```text
+The following 1 profile is active: "test"
+```
+
+这证明 `application-test.properties` 已正确加载。目前只剩一个清理项：`src/test/resources/application.properties` 仍然存在，与 `application-test.properties` 重复，应删除后再执行一次完整测试。
+
+期望的最终职责：
+
+| 文件 | 职责 |
+|---|---|
+| `application.properties` | 所有环境共用配置 |
+| `application-dev.properties` | 本地 MySQL 开发配置 |
+| `application-test.properties` | H2 测试配置 |
+| `application-prod.properties` | 从环境变量读取的生产配置 |
+
+### 8.6 完成检查
 
 - [ ] dev、test 和 prod 配置分离。
 - [ ] 测试不依赖本地 MySQL。

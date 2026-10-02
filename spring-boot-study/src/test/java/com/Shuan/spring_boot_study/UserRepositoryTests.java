@@ -9,6 +9,9 @@ import org.springframework.data.domain.PageRequest;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import org.springframework.boot.data.jpa.test.autoconfigure.DataJpaTest;
+import org.springframework.test.context.ActiveProfiles;
+
+@ActiveProfiles("test")
 @DataJpaTest
 public class UserRepositoryTests {
     @Autowired
