@@ -14,6 +14,8 @@ import com.Shuan.spring_boot_study.dto.UserResponse;
 
 import org.springframework.data.domain.Page;
 import org.springframework.data.domain.Pageable;
+import com.Shuan.spring_boot_study.exception.DuplicateEmailException;
+import com.Shuan.spring_boot_study.dto.PatchUserRequest;
 
 @RestController
 @RequestMapping("/api/users")
@@ -35,21 +37,6 @@ public class UserController {
        return UserResponse.from(userService.findByIdOrThrow(id));
    }
 
-   @PostMapping
-   @ResponseStatus(HttpStatus.CREATED)
-    public UserResponse create( @Valid @RequestBody CreateUserRequest request) {
-
-       return  UserResponse.from(userService.create(request.name()));
-   }
-
-   @PutMapping("/{id}")
-    public  UserResponse update(
-           @PathVariable Long id ,
-           @Valid @RequestBody UpdateUserRequest request
-   ) {
-       return UserResponse.from(userService.update(id, request.name()));
-   }
-
    @DeleteMapping("/{id}")
     @ResponseStatus(HttpStatus.NO_CONTENT)
     public void delete(@PathVariable Long id) {
@@ -68,4 +55,29 @@ public class UserController {
    ) {
        return  userService.searchByName(name, pageable).map(UserResponse::from);
    }
+
+    @PostMapping
+    @ResponseStatus(HttpStatus.CREATED)
+    public UserResponse create (@Valid @RequestBody CreateUserRequest request) {
+        return UserResponse.from(
+                userService.create(request.name(), request.email())
+        );
+    }
+
+    @PutMapping("/{id}")
+    public UserResponse update (
+            @PathVariable Long id,
+            @Valid @RequestBody UpdateUserRequest request) {
+       return UserResponse.from(
+               userService.update(id , request.name(), request.email())
+       );
+   }
+
+    @PatchMapping("/{id}")
+    public UserResponse patch(
+            @PathVariable Long id,
+            @Valid @RequestBody PatchUserRequest request
+    ) {
+        return UserResponse.from(userService.patch(id, request));
+    }
 }

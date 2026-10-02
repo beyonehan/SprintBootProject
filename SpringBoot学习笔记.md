@@ -4620,104 +4620,855 @@ The following 1 profile is active: "test"
 
 ## 9. Task 17：扩展真实业务
 
-### 9.1 扩展 User
+### 实际问题：为什么启动时报 `missing column [created_at]`？
 
-添加：
+**问：数据库已经连接成功，为什么应用还是启动失败？**
 
-```java
-@Column(nullable = false, unique = true)
-private String email;
+答：`HikariPool-1 - Start completed` 只代表 JDBC 成功连接 MySQL。随后 Hibernate 根据 `spring.jpa.hibernate.ddl-auto=validate` 对比 Entity 与真实表结构，发现 `User.createdAt` 对应的 `app_users.created_at` 不存在，于是阻止应用启动。这说明 `validate` 正在正常保护数据库结构。
 
-@Enumerated(EnumType.STRING)
-@Column(nullable = false)
-private UserStatus status = UserStatus.ACTIVE;
+**问：为什么 Flyway 没有自动创建 `created_at`？**
 
-@CreationTimestamp
-private Instant createdAt;
+答：有两个原因：
 
-@UpdateTimestamp
-private Instant updatedAt;
+1. Spring Boot 4.1.1 已将 Flyway 自动配置拆分为单独模块。只引入 `flyway-core` 和 `flyway-mysql` 不足以启用 Boot 自动配置，需要 `spring-boot-starter-flyway`。
+2. 项目目录实际只有 V1 和 V2，原计划中的 `V3__complete_user_business_fields.sql` 尚未创建，没有迁移负责添加 `status`、`created_at` 和 `updated_at`。
+
+**问：当前开发环境的 `baseline-version` 应该是多少？**
+
+答：实际运行 V3 时出现 `Unknown column 'email'`，证明当前旧库只有 V1 的 `id`、`name` 结构，并没有 V2 的 `email`。因此 baseline 必须为 1，让 Flyway 接着执行 V2 和 V3。baseline 版本不能凭代码或印象判断，必须以 `DESCRIBE app_users;` 的真实结果为准。
+
+**问：为什么不能把 `ddl-auto` 临时改回 `update`？**
+
+答：`update` 会让 Hibernate 直接修改数据库，虽然可能临时补上列，却绕过 Flyway 的迁移版本记录。其他环境便无法可靠复现结构。正确分工是：Flyway 负责修改结构，Hibernate 的 `validate` 负责检查结构。
+
+本次修复：
+
+- 将 `flyway-core` 换成 `spring-boot-starter-flyway`，并保留 `flyway-mysql`。
+- 新增 `V3__complete_user_business_fields.sql`。
+- 将开发环境 baseline 设为 1，让已有的 V1 旧库继续执行 V2、V3。
+- 将 Java 字段 `updateAt` 统一为 `updatedAt`，对应数据库列 `updated_at`。
+
+重新启动后，应先看到 Flyway 执行 V3，再看到 Hibernate 完成 schema validation。可以进入 MySQL 验证：
+
+```sql
+SELECT * FROM flyway_schema_history ORDER BY installed_rank;
+DESCRIBE app_users;
 ```
 
-状态枚举：
+### 实际问题：V3 首次失败后，为什么第二次启动直接 validation failed？
+
+**问：第一次是 `Unknown column 'email'`，第二次为什么变成 `Detected failed migration to version 3`？**
+
+答：第一次迁移失败后，Flyway 已经在 `flyway_schema_history` 中记录 V3 的失败状态。第二次启动时 Flyway 会先校验历史记录，发现失败记录后停止，不会盲目重试。这是为了避免在一个可能只执行了一半的数据库上继续修改。
+
+本次 V3 在第一条 `UPDATE` 就因为 `email` 不存在而失败，V3 后面的 `ALTER TABLE` 尚未执行。又因为这张历史表是刚刚对旧开发库进行错误 baseline 时创建的，所以修正 baseline 为 1 后，可以删除这张刚创建的历史表并重新接管：
+
+```sql
+DROP TABLE flyway_schema_history;
+```
+
+然后重新启动。Flyway 会依次执行：baseline V1 → V2 添加 `email` → V3 补齐业务字段。这里不能形成“遇到迁移失败就删历史表”的习惯；已经多人共用或已经上线的数据库，应先检查半成品结构并使用正式 repair/补偿迁移方案。
+
+### 问：命令行启动和直接在 IDEA Run 有什么区别？
+
+本质上没有区别，两者最终都会执行 `SpringBootStudyApplication.main()` 并启动同一个 Spring Boot 应用。真正影响运行结果的是启动时传入的配置是否一致。
+
+命令行中的操作分别表示：
+
+```bash
+read -s "DB_PASSWORD?MySQL password: "
+```
+
+安全读取密码到当前 shell 的 `DB_PASSWORD` 变量；`-s` 表示输入时不回显。
+
+```bash
+export DB_PASSWORD
+```
+
+把 shell 变量导出成环境变量，使随后启动的 Java 子进程可以读取 `${DB_PASSWORD}`。
+
+```bash
+echo
+```
+
+密码输入不回显，也不会自动显示一个整洁的新行；这里仅用于改善终端显示，与 Spring Boot 无关。
+
+```bash
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+通过项目自带的 Maven Wrapper 启动应用，并激活 `dev` Profile，因此会同时加载：
+
+```text
+application.properties
+application-dev.properties
+```
+
+如果直接点击 IDEA Run，而 Run Configuration 没有配置环境变量和 Active Profile，应用可能：
+
+- 读取不到 `${DB_PASSWORD}`；
+- 没有激活 `dev`；
+- 不加载 `application-dev.properties`；
+- 最终表现得和命令行启动不同。
+
+在 IDEA 中打开：
+
+```text
+Run → Edit Configurations → SpringBootStudyApplication
+```
+
+设置：
+
+```text
+Active profiles: dev
+Environment variables: DB_PASSWORD=你的数据库密码
+```
+
+如果界面没有 `Active profiles` 输入框，也可以在 `Program arguments` 中填写：
+
+```text
+--spring.profiles.active=dev
+```
+
+或者在 `VM options` 中填写：
+
+```text
+-Dspring.profiles.active=dev
+```
+
+三种 Profile 写法选择一种即可，不要重复配置。配置完成后，IDEA Run 与命令行启动应加载相同的数据库和 Flyway 配置。为了避免泄露密码，不要把密码写进 `application.properties`、Git 仓库或截图中。
+
+### 9.1 学习目标
+
+1. 为用户增加邮箱、状态、创建时间和更新时间。
+2. 使用 Flyway 安全处理现有数据。
+3. 同时在 Service 和数据库层保证邮箱唯一。
+4. 使用 HTTP 409 表示唯一资源冲突。
+5. 使用 PATCH 只更新客户端传入的字段。
+6. 为新增业务规则编写测试。
+
+### 9.2 实施顺序
+
+不要一次同时修改所有文件。按照下列顺序，每一步编译通过后再继续：
+
+```text
+1. 设计字段和迁移策略
+2. 创建 V3 Flyway 迁移
+3. 创建 UserStatus
+4. 完整修改 User Entity
+5. 修改 Request / Response DTO
+6. 修改 Repository
+7. 创建重复邮箱异常
+8. 修改 Service
+9. 修改 Controller
+10. 启动并验证 Flyway
+11. 执行 curl 测试
+12. 补充自动化测试
+```
+
+### 9.3 为什么不直接修改 V2
+
+`V2__add_email_to_users.sql` 已经存在，并可能已记录在 `flyway_schema_history`中。已执行的迁移不能直接修改，否则 Flyway 会发现 checksum 变化并拒绝启动。
+
+因此本任务创建：
+
+```text
+src/main/resources/db/migration/V3__complete_user_business_fields.sql
+```
+
+### 9.4 安全迁移现有用户数据
+
+当前数据库已有 David、Emma 等用户，他们的 `email` 是 `NULL`。如果立即把 email 改成 `NOT NULL`，迁移会失败。
+
+`V3__complete_user_business_fields.sql` 使用以下顺序：
+
+```sql
+UPDATE app_users
+SET email = CONCAT('legacy-', id, '@example.invalid')
+WHERE email IS NULL OR TRIM(email) = '';
+
+ALTER TABLE app_users
+    MODIFY COLUMN email VARCHAR(255) NOT NULL,
+    ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+    ADD COLUMN created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    ADD COLUMN updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    ADD CONSTRAINT uk_app_users_email UNIQUE (email);
+```
+
+这里使用 `example.invalid` 为历史用户生成不会真实投递的占位邮箱。真实生产系统通常通过正式的数据清理任务补齐历史数据。
+
+执行前先确认 V2 是否已完成：
+
+```sql
+SELECT installed_rank, version, description, success
+FROM flyway_schema_history
+ORDER BY installed_rank;
+```
+
+### 9.5 创建 UserStatus
+
+新建：
+
+```text
+src/main/java/com/Shuan/spring_boot_study/model/UserStatus.java
+```
+
+内容：
 
 ```java
+package com.Shuan.spring_boot_study.model;
+
 public enum UserStatus {
     ACTIVE,
     DISABLED
 }
 ```
 
-同步更新 Flyway SQL，不要只改 Entity。
+Java 枚举常量统一使用大写。不要在一处写 `ACTIVE`，另一处写 `Active`。
 
-### 9.2 扩展 DTO
+### 9.6 完整修改 User Entity
 
-`CreateUserRequest` 添加：
+`User.java` 修改为：
 
 ```java
-@NotBlank(message = "邮箱不能为空")
-@Email(message = "邮箱格式不正确")
-String email
+package com.Shuan.spring_boot_study.model;
+
+import jakarta.persistence.Column;
+import jakarta.persistence.Entity;
+import jakarta.persistence.EnumType;
+import jakarta.persistence.Enumerated;
+import jakarta.persistence.GeneratedValue;
+import jakarta.persistence.GenerationType;
+import jakarta.persistence.Id;
+import jakarta.persistence.Table;
+import org.hibernate.annotations.CreationTimestamp;
+import org.hibernate.annotations.UpdateTimestamp;
+
+import java.time.Instant;
+
+@Entity
+@Table(name = "app_users")
+public class User {
+
+    @Id
+    @GeneratedValue(strategy = GenerationType.IDENTITY)
+    private Long id;
+
+    @Column(nullable = false, length = 50)
+    private String name;
+
+    @Column(nullable = false, unique = true, length = 255)
+    private String email;
+
+    @Enumerated(EnumType.STRING)
+    @Column(nullable = false, length = 20)
+    private UserStatus status = UserStatus.ACTIVE;
+
+    @CreationTimestamp
+    @Column(nullable = false, updatable = false)
+    private Instant createdAt;
+
+    @UpdateTimestamp
+    @Column(nullable = false)
+    private Instant updatedAt;
+
+    protected User() {
+    }
+
+    public User(String name, String email) {
+        this.name = name;
+        this.email = email;
+    }
+
+    public void changeName(String name) {
+        this.name = name;
+    }
+
+    public void changeEmail(String email) {
+        this.email = email;
+    }
+
+    public void changeStatus(UserStatus status) {
+        this.status = status;
+    }
+
+    public Long getId() {
+        return id;
+    }
+
+    public String getName() {
+        return name;
+    }
+
+    public String getEmail() {
+        return email;
+    }
+
+    public UserStatus getStatus() {
+        return status;
+    }
+
+    public Instant getCreatedAt() {
+        return createdAt;
+    }
+
+    public Instant getUpdatedAt() {
+        return updatedAt;
+    }
+}
 ```
 
-`UserResponse` 添加 `email`、`status`、`createdAt` 和 `updatedAt`。
+注意拼写必须一致：
 
-### 9.3 唯一性检查
+```text
+status     不是 staus
+updatedAt  不是 updateAt
+ACTIVE     不是 Active
+```
 
-Repository 添加：
+### 9.7 修改 CreateUserRequest
+
+`record` 不需要写 `<name,email>` 泛型。两个组件之间必须有逗号。
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+public record CreateUserRequest(
+        @NotBlank(message = "用户名不能为空")
+        @Size(min = 2, max = 50, message = "用户名长度必须在2到50个字符之间")
+        String name,
+
+        @NotBlank(message = "邮箱不能为空")
+        @Email(message = "邮箱格式不正确")
+        @Size(max = 255, message = "邮箱长度不能超过255个字符")
+        String email
+) {
+}
+```
+
+`@NotBlank` 检查空值和空白字符；`@Email` 检查格式。两者不能用两个 `@NotBlank` 替代。
+
+### 9.8 修改 UpdateUserRequest
+
+PUT 表示更新完整用户资源，因此同时接收 name 和 email：
+
+```java
+public record UpdateUserRequest(
+        @NotBlank(message = "用户名不能为空")
+        @Size(min = 2, max = 50, message = "用户名长度必须在2到50个字符之间")
+        String name,
+
+        @NotBlank(message = "邮箱不能为空")
+        @Email(message = "邮箱格式不正确")
+        @Size(max = 255, message = "邮箱长度不能超过255个字符")
+        String email
+) {
+}
+```
+
+### 9.9 创建 PatchUserRequest
+
+PATCH 字段允许为 `null`，因为 `null` 表示“没有要求更新该字段”。`@Size`、`@Email` 和 `@Pattern` 对 `null` 不报错，但对实际传入的非法值报错。
+
+新建 `dto/PatchUserRequest.java`：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import com.Shuan.spring_boot_study.model.UserStatus;
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.Pattern;
+import jakarta.validation.constraints.Size;
+
+public record PatchUserRequest(
+        @Pattern(regexp = ".*\\S.*", message = "用户名不能全是空白字符")
+        @Size(min = 2, max = 50, message = "用户名长度必须在2到50个字符之间")
+        String name,
+
+        @Email(message = "邮箱格式不正确")
+        @Size(max = 255, message = "邮箱长度不能超过255个字符")
+        String email,
+
+        UserStatus status
+) {
+}
+```
+
+### 9.10 修改 UserResponse
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import com.Shuan.spring_boot_study.model.User;
+import com.Shuan.spring_boot_study.model.UserStatus;
+
+import java.time.Instant;
+
+public record UserResponse(
+        Long id,
+        String name,
+        String email,
+        UserStatus status,
+        Instant createdAt,
+        Instant updatedAt
+) {
+    public static UserResponse from(User user) {
+        return new UserResponse(
+                user.getId(),
+                user.getName(),
+                user.getEmail(),
+                user.getStatus(),
+                user.getCreatedAt(),
+                user.getUpdatedAt()
+        );
+    }
+}
+```
+
+### 9.11 修改 UserRepository
+
+邮箱查询方法属于 Repository，不是 Service 接口声明。
+
+```java
+public interface UserRepository extends JpaRepository<User, Long> {
+
+    Page<User> findByNameContainingIgnoreCase(String name, Pageable pageable);
+
+    boolean existsByEmailIgnoreCase(String email);
+
+    boolean existsByEmailIgnoreCaseAndIdNot(String email, Long id);
+}
+```
+
+`existsByEmailIgnoreCaseAndIdNot()` 用于更新用户：检查邮箱是否属于其他用户，排除当前用户自己。
+
+### 9.12 创建 DuplicateEmailException
+
+新建 `exception/DuplicateEmailException.java`：
+
+```java
+package com.Shuan.spring_boot_study.exception;
+
+public class DuplicateEmailException extends RuntimeException {
+
+    public DuplicateEmailException(String email) {
+        super("邮箱已被使用：" + email);
+    }
+}
+```
+
+在 `GlobalExceptionHandler` 中增加：
+
+```java
+@ExceptionHandler(DuplicateEmailException.class)
+@ResponseStatus(HttpStatus.CONFLICT)
+public ApiError handleDuplicateEmail(
+        DuplicateEmailException exception,
+        HttpServletRequest request
+) {
+    return new ApiError(
+            Instant.now(),
+            HttpStatus.CONFLICT.value(),
+            HttpStatus.CONFLICT.getReasonPhrase(),
+            exception.getMessage(),
+            request.getRequestURI(),
+            Map.of("email", exception.getMessage())
+    );
+}
+```
+
+HTTP 409 Conflict 表示请求格式正确，但与当前资源状态冲突。
+
+### 9.13 修改 UserService
+
+为了保证邮箱比较一致，先统一去除首尾空格并转为小写：
+
+```java
+private String normalizeEmail(String email) {
+    return email.strip().toLowerCase(Locale.ROOT);
+}
+```
+
+创建用户：
+
+```java
+@Transactional
+public User create(String name, String email) {
+    String normalizedEmail = normalizeEmail(email);
+
+    if (userRepository.existsByEmailIgnoreCase(normalizedEmail)) {
+        throw new DuplicateEmailException(normalizedEmail);
+    }
+
+    User user = new User(name.strip(), normalizedEmail);
+    return userRepository.save(user);
+}
+```
+
+PUT 更新：
+
+```java
+@Transactional
+public User update(Long id, String name, String email) {
+    User user = findByIdOrThrow(id);
+    String normalizedEmail = normalizeEmail(email);
+
+    if (userRepository.existsByEmailIgnoreCaseAndIdNot(normalizedEmail, id)) {
+        throw new DuplicateEmailException(normalizedEmail);
+    }
+
+    user.changeName(name.strip());
+    user.changeEmail(normalizedEmail);
+    return user;
+}
+```
+
+PATCH 部分更新：
+
+```java
+@Transactional
+public User patch(Long id, PatchUserRequest request) {
+    User user = findByIdOrThrow(id);
+
+    if (request.name() != null) {
+        user.changeName(request.name().strip());
+    }
+
+    if (request.email() != null) {
+        String normalizedEmail = normalizeEmail(request.email());
+        if (userRepository.existsByEmailIgnoreCaseAndIdNot(normalizedEmail, id)) {
+            throw new DuplicateEmailException(normalizedEmail);
+        }
+        user.changeEmail(normalizedEmail);
+    }
+
+    if (request.status() != null) {
+        user.changeStatus(request.status());
+    }
+
+    return user;
+}
+```
+
+需要导入：
+
+```java
+import com.Shuan.spring_boot_study.dto.PatchUserRequest;
+import com.Shuan.spring_boot_study.exception.DuplicateEmailException;
+import java.util.Locale;
+```
+
+Service 中不应出现下列无实现的方法声明：
 
 ```java
 boolean existsByEmailIgnoreCase(String email);
 ```
 
-Service 创建用户前检查：
+该方法应定义在 `UserRepository`。
+
+### 9.14 修改 UserController
+
+POST 传入 email：
 
 ```java
-if (userRepository.existsByEmailIgnoreCase(email)) {
-    throw new DuplicateEmailException(email);
+@PostMapping
+@ResponseStatus(HttpStatus.CREATED)
+public UserResponse create(@Valid @RequestBody CreateUserRequest request) {
+    return UserResponse.from(
+            userService.create(request.name(), request.email())
+    );
 }
 ```
 
-`GlobalExceptionHandler` 将 `DuplicateEmailException` 转换为 HTTP 409 Conflict。应同时保留数据库唯一约束，防止并发请求绕过业务检查。
-
-### 9.4 PATCH 部分更新
-
-创建 `PatchUserRequest`，字段允许为 `null`，Service 只更新客户端实际提供的字段：
+PUT 传入 email：
 
 ```java
-if (request.name() != null) {
-    user.changeName(request.name().trim());
-}
-if (request.email() != null) {
-    user.changeEmail(request.email().trim().toLowerCase());
+@PutMapping("/{id}")
+public UserResponse update(
+        @PathVariable Long id,
+        @Valid @RequestBody UpdateUserRequest request
+) {
+    return UserResponse.from(
+            userService.update(id, request.name(), request.email())
+    );
 }
 ```
 
-Controller 路由：
+增加 PATCH：
 
 ```java
 @PatchMapping("/{id}")
+public UserResponse patch(
+        @PathVariable Long id,
+        @Valid @RequestBody PatchUserRequest request
+) {
+    return UserResponse.from(userService.patch(id, request));
+}
 ```
 
-### 9.5 验证
+### 9.15 先编译，再启动数据库迁移
+
+先检查 Java 语法：
+
+```bash
+./mvnw test -DskipTests
+```
+
+编译通过后，使用 dev Profile 启动：
+
+```bash
+read -s "DB_PASSWORD?MySQL password: "
+export DB_PASSWORD
+echo
+./mvnw spring-boot:run -Dspring-boot.run.profiles=dev
+```
+
+启动成功后检查：
+
+```sql
+SELECT installed_rank, version, description, success
+FROM flyway_schema_history
+ORDER BY installed_rank;
+
+DESCRIBE app_users;
+
+SELECT id, name, email, status, created_at, updated_at
+FROM app_users;
+```
+
+### 9.16 使用 curl 验证
+
+创建用户：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Alice","email":"Alice@Example.com"}' \
+  http://localhost:8080/api/users
+```
+
+预期 HTTP 201，响应中 email 已规范化为小写：
+
+```json
+{
+  "id": 5,
+  "name": "Alice",
+  "email": "alice@example.com",
+  "status": "ACTIVE",
+  "createdAt": "...",
+  "updatedAt": "..."
+}
+```
+
+创建重复邮箱：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Another Alice","email":"ALICE@example.com"}' \
+  http://localhost:8080/api/users
+```
+
+预期 HTTP 409。
+
+邮箱格式错误：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Invalid Email","email":"not-an-email"}' \
+  http://localhost:8080/api/users
+```
+
+预期 HTTP 400。
+
+只修改名称，不清空 email 和 status：
 
 ```bash
 curl -i \
   -X PATCH \
   -H 'Content-Type: application/json' \
-  -d '{"name":"New Name"}' \
-  http://localhost:8080/api/users/1
+  -d '{"name":"Alice Updated"}' \
+  http://localhost:8080/api/users/5
 ```
 
-还要测试邮箱重复返回 409，以及邮箱格式错误返回 400。
+禁用用户：
 
-### 9.6 完成检查
+```bash
+curl -i \
+  -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"DISABLED"}' \
+  http://localhost:8080/api/users/5
+```
 
-- [ ] Entity、DTO 和 Flyway 迁移保持一致。
-- [ ] 邮箱同时有业务检查和数据库唯一约束。
+传入未知状态时，JSON 解析将失败：
+
+```bash
+curl -i \
+  -X PATCH \
+  -H 'Content-Type: application/json' \
+  -d '{"status":"UNKNOWN"}' \
+  http://localhost:8080/api/users/5
+```
+
+后续可为 `HttpMessageNotReadableException` 补充统一 HTTP 400 错误处理。
+
+### 9.17 更新自动化测试
+
+旧测试中的：
+
+```java
+new User("Emma")
+```
+
+需要改为：
+
+```java
+new User("Emma", "emma@example.com")
+```
+
+至少增加以下测试：
+
+- 创建用户会保存规范化后的邮箱。
+- 重复邮箱抛出 `DuplicateEmailException`。
+- POST 邮箱格式错误返回 400。
+- POST 重复邮箱返回 409。
+- PATCH 只修改 name 时保留 email。
+- Repository 不区分大小写检查邮箱。
+
+最后执行：
+
+```bash
+./mvnw test
+```
+
+### 9.18 常见问题
+
+#### CreateUserRequest 报语法错误
+
+不要写：
+
+```java
+public record CreateUserRequest<name,email>(
+```
+
+`<name,email>` 会被 Java 当成泛型参数。正确写法是：
+
+```java
+public record CreateUserRequest(
+```
+
+record 的两个字段之间必须有逗号。
+
+#### cannot find symbol: STring
+
+Java 区分大小写，正确类名是：
+
+```java
+String
+```
+
+不是：
+
+```java
+STring
+```
+
+#### Hibernate 报 email 或 status 字段不匹配
+
+检查：
+
+1. V3 是否已成功执行。
+2. Entity 字段和 SQL 列名是否对应。
+3. `status` 是否使用 `@Enumerated(EnumType.STRING)`。
+4. `ddl-auto` 是否仍为 `validate`。
+
+#### Flyway 报 checksum mismatch
+
+说明已经执过的 V1 或 V2 被修改。不要随意删除 `flyway_schema_history`或执行 repair。将新变化放在 V3、V4 等新迁移中。
+
+#### 实际编译错误：Task 17 一次出现 18 个错误
+
+本次执行：
+
+```bash
+./mvnw test -DskipTests
+```
+
+出现 18 个编译错误。它们不是 18 个独立问题，而是以下几组根因造成的连锁报错。
+
+1. `UserController` 同时保留了旧的 POST/PUT 和新的 POST/PUT，造成方法重复。
+2. 旧 Controller 方法仍以旧参数数量调用 Service。
+3. `PatchUserRequest` 文件已存在，但 Controller 和 Service 没有 import。
+4. `DuplicateEmailException` 被拼成了 `DuplicateEmailExcption`。
+5. Repository 中的 `exists` 和 `Ignore` 拼写错误。
+6. `@Valid` 和 `@RequestBody` 拼写及大小写错误。
+7. Service 缺少 `Locale` 和异常类 import。
+8. `UpdateUserRequest` 缺少 `Email` import。
+
+修复时按根因顺序处理，不要按 Maven 输出的 18 行随机修改：
+
+```text
+删除重复 Controller 方法
+    ↓
+修正文件名和类名拼写
+    ↓
+修正 Repository 方法名
+    ↓
+补齐 import
+    ↓
+重新编译
+    ↓
+再处理剩余错误
+```
+
+### 9.19 完成检查
+
+- [ ] 创建 `V3__complete_user_business_fields.sql`。
+- [ ] V3 为历史用户填充唯一占位邮箱。
+- [ ] 创建 `UserStatus` 枚举。
+- [ ] `User` 中字段名和 getter 完整正确。
+- [ ] Create/Update/Patch DTO 校验正确。
+- [ ] `UserResponse` 返回新字段。
+- [ ] 邮箱查询方法位于 Repository。
+- [ ] 创建 `DuplicateEmailException`。
 - [ ] 重复邮箱返回 HTTP 409。
-- [ ] PATCH 不会清空未提供的字段。
-- [ ] 新增功能有自动化测试。
+- [ ] POST、PUT 和 PATCH 都正确处理 email。
+- [ ] PATCH 不会清空未传入的字段。
+- [ ] Flyway 历史显示 V3 执行成功。
+- [ ] `./mvnw test` 显示 `BUILD SUCCESS`。
+
+### 9.20 学习记录
+
+```text
+完成日期：
+
+V3 迁移结果：
+
+正常创建用户响应：
+
+重复邮箱响应：
+
+PATCH 响应：
+
+我对 Service 唯一性检查的理解：
+
+我对数据库唯一约束的理解：
+
+我对 PUT 和 PATCH 区别的理解：
+
+遇到的问题：
+
+解决方法：
+```
 
 ## 10. Task 18：认证与权限
 
