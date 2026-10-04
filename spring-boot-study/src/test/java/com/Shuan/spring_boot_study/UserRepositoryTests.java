@@ -19,8 +19,8 @@ public class UserRepositoryTests {
 
     @Test
     void searchesNameIgnoringCase() {
-        userRepository.save(new User("Emma"));
-        userRepository.save(new User("Bob"));
+        userRepository.save(new User("Emma", "emma@example.com", "test-password-hash"));
+        userRepository.save(new User("Bob", "bob@example.com", "test-password-hash"));
 
         Page<User> result = userRepository.findByNameContainingIgnoreCase(
                 "EM",

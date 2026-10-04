@@ -4738,6 +4738,40 @@ Environment variables: DB_PASSWORD=你的数据库密码
 
 三种 Profile 写法选择一种即可，不要重复配置。配置完成后，IDEA Run 与命令行启动应加载相同的数据库和 Flyway 配置。为了避免泄露密码，不要把密码写进 `application.properties`、Git 仓库或截图中。
 
+### 问：以后每增加一张业务表，都需要新建一个 `.sql` 文件吗？
+
+通常需要，但准确规则不是“一张表对应一个文件”，而是“每次数据库结构变更对应一个新的 Flyway 版本”。例如：
+
+```text
+V1__create_users_table.sql
+V2__add_email_to_users.sql
+V3__complete_user_business_fields.sql
+V4__create_products_table.sql
+V5__create_orders_and_order_items.sql
+V6__add_index_to_orders.sql
+```
+
+一个迁移文件可以创建一张表，也可以创建同一个业务功能所需的多张紧密相关的表。例如订单与订单明细必须配合使用，可以放在同一个 V5 中；如果变更互不相关，拆开更容易排错和回滚。
+
+需要新建迁移文件的典型情况：
+
+- 创建或删除表；
+- 添加、删除或修改列；
+- 添加索引、唯一约束、外键；
+- 修改字段类型或默认值；
+- 必须跟随结构升级的基础数据转换。
+
+不需要数据库迁移的情况：
+
+- 只新增 Controller 页面或 API；
+- 只修改 Java 业务逻辑；
+- 只修改 DTO；
+- 只改接口返回格式且数据库结构未变化。
+
+已经成功执行并提交共享的 V1、V2、V3 不应直接修改。下一次结构变化应创建 V4。Flyway 通过 `flyway_schema_history` 判断每个环境还缺哪些版本，并只执行尚未执行的迁移。
+
+普通业务数据不建议写入版本迁移，例如用户注册产生的数据应由应用写入。系统必须存在的固定数据，例如角色、权限或字典项，可以使用单独的版本迁移插入，但 SQL 应尽量设计成可预测且不会产生重复数据。
+
 ### 9.1 学习目标
 
 1. 为用户增加邮箱、状态、创建时间和更新时间。
@@ -5472,6 +5506,566 @@ PATCH 响应：
 
 ## 10. Task 18：认证与权限
 
+> 本任务不要一次性把注册、登录、JWT、角色全部写完。每个阶段都必须先编译、运行和验证，再进入下一阶段。
+
+### 10.0 当前完成度检查（2026-10-03）
+
+当前约完成 **15%**。
+
+| 内容 | 当前状态 | 说明 |
+|---|---|---|
+| Security 依赖 | 已完成 | security 与 resource-server 已加入 pom |
+| `PasswordEncoder` Bean | 已完成 | 已放入 `SecurityConfig` |
+| `AuthService` | 仅有骨架 | `RegisteredRequest` 不存在，当前不能编译 |
+| V4 密码与角色迁移 | 未开始 | 数据库还没有 `password_hash`、`role` |
+| User 密码与角色字段 | 未开始 | 还不能保存认证信息 |
+| 注册 DTO/API | 未开始 | 没有 RegisterRequest、AuthController |
+| 登录 DTO/API | 未开始 | 没有 LoginRequest、登录验证 |
+| JWT 签发与验证 | 未开始 | 没有 JwtService、Encoder、Decoder |
+| URL 权限规则 | 未开始 | 还没有 SecurityFilterChain |
+| 401/403 测试 | 未开始 | 还没有安全测试 |
+
+当前首个编译错误：
+
+```text
+cannot find symbol: class RegisteredRequest
+```
+
+原因有两个：
+
+1. 项目里没有这个 DTO；
+2. 名称应该使用 `RegisterRequest`，不是 `RegisteredRequest`。
+
+`AuthService` 中下面这个 import 也应删除，它与注册请求无关：
+
+```java
+import jdk.jfr.Registered;
+```
+
+### 10.0.1 本任务最终文件结构
+
+完成后应该新增或修改：
+
+```text
+config/
+  SecurityConfig.java
+controller/
+  AuthController.java
+dto/
+  RegisterRequest.java
+  LoginRequest.java
+  AuthResponse.java
+exception/
+  InvalidCredentialsException.java
+model/
+  User.java
+  UserRole.java
+repository/
+  UserRepository.java
+service/
+  AuthService.java
+  JwtService.java
+resources/db/migration/
+  V4__add_authentication_fields.sql
+```
+
+### 10.0.2 阶段一：先确认 Task 17 数据库完成
+
+进入 MySQL：
+
+```sql
+SELECT version, description, success
+FROM flyway_schema_history
+ORDER BY installed_rank;
+
+DESCRIBE app_users;
+```
+
+必须确认 V3 成功，且存在 `email`、`status`、`created_at`、`updated_at`，再创建 V4。
+
+### 10.0.3 阶段二：V4 添加认证字段
+
+创建：
+
+```text
+src/main/resources/db/migration/V4__add_authentication_fields.sql
+```
+
+学习项目已有旧用户，因此不能直接添加无默认值的 NOT NULL 密码。先为旧数据写入一个不可用于正常登录的 BCrypt 哈希：
+
+```sql
+ALTER TABLE app_users
+    ADD COLUMN password_hash VARCHAR(100) NULL,
+    ADD COLUMN role VARCHAR(20) NOT NULL DEFAULT 'USER';
+
+UPDATE app_users
+SET password_hash = '$2a$10$7EqJtq98hPqEX7fNZaFWoO5uR7ZqXwJxY6sL6S9lEOhAandQKUWjK'
+WHERE password_hash IS NULL;
+
+ALTER TABLE app_users
+    MODIFY COLUMN password_hash VARCHAR(100) NOT NULL;
+```
+
+说明：这里的旧用户密码只是迁移占位方案。真实系统应执行密码重置流程，不能给所有旧用户分配同一个公开密码。
+
+启动应用，让 Flyway 执行 V4，然后验证：
+
+```sql
+SELECT version, description, success
+FROM flyway_schema_history
+ORDER BY installed_rank;
+
+DESCRIBE app_users;
+```
+
+#### 实际错误：Flyway 提示迁移文件未按命名规则，但应用仍然启动
+
+日志：
+
+```text
+1 SQL migrations were detected but not run because they did not follow the filename convention
+Current version of schema: 3
+Schema is up to date. No migration necessary.
+```
+
+错误文件名：
+
+```text
+V4_Add_authentication_fields.sql
+```
+
+正确文件名：
+
+```text
+V4__add_authentication_fields.sql
+  ↑ 两个下划线
+```
+
+Flyway 的版本迁移格式是 `V版本__描述.sql`，版本与描述之间必须是两个下划线。文件名无效时 Flyway 默认可能只警告并忽略，应用仍能启动，因此不能只看最后的 `Started`，还必须检查 Flyway 日志中的当前版本。
+
+本次 SQL 内还有两处拼写错误：
+
+```sql
+password hash  -- 错误：中间是空格
+password_has   -- 错误：缺少最后的 h
+password_hash  -- 正确
+```
+
+由于文件名无效，Flyway 完全没有执行该文件，数据库没有发生 V4 的半完成修改，因此可以直接修正文件名和 SQL 后重新启动。为了以后让无效名称直接导致启动失败，可配置：
+
+```properties
+spring.flyway.validate-migration-naming=true
+```
+
+### 10.0.4 阶段三：创建角色并修改 User
+
+新建 `model/UserRole.java`：
+
+```java
+package com.Shuan.spring_boot_study.model;
+
+public enum UserRole {
+    USER,
+    ADMIN
+}
+```
+
+在 `User` 中添加：
+
+```java
+@Column(name = "password_hash", nullable = false, length = 100)
+private String passwordHash;
+
+@Enumerated(EnumType.STRING)
+@Column(nullable = false, length = 20)
+private UserRole role = UserRole.USER;
+```
+
+将创建用户的构造方法改为：
+
+```java
+public User(String name, String email, String passwordHash) {
+    this.name = name;
+    this.email = email;
+    this.passwordHash = passwordHash;
+    this.role = UserRole.USER;
+}
+```
+
+添加 getter，但绝不能把 `passwordHash` 放进 `UserResponse`：
+
+```java
+public String getPasswordHash() {
+    return passwordHash;
+}
+
+public UserRole getRole() {
+    return role;
+}
+```
+
+这一步会使旧的 `new User(name, email)` 编译失败。根据编译提示修改调用处，测试代码可以使用一个合法 BCrypt 哈希或通过新的三参数构造器传入测试字符串。
+
+#### 实际错误：找不到 `User(String, String, String)` 构造器
+
+`AuthService` 已经调用：
+
+```java
+new User(name, email, passwordHash)
+```
+
+但当时 `User` 只有 `User(String, String)`，因此实际参数是 3 个而形参只有 2 个。修复不是随意删掉 `passwordHash` 参数，而是完成 V4 对应的实体映射。
+
+同时发现一种错误设计：
+
+```java
+private PasswordEncoder passwordEncoder;
+```
+
+`PasswordEncoder` 不能作为 `User` 的 JPA 字段。它是 Service 使用的工具 Bean；`User` 真正保存的字段应为：
+
+```java
+private String passwordHash;
+```
+
+本次同步完成：
+
+- `UserRole` 从空 class 改为包含 `USER`、`ADMIN` 的 enum；
+- `User` 映射 `password_hash` 和 `role`；
+- 添加三参数构造器；
+- `AuthService.register()` 保存并返回用户；
+- 旧的 `/api/users` 创建入口也接收密码并进行 BCrypt 编码；
+- Repository 测试使用三参数构造器。
+
+验证结果：
+
+```text
+Tests run: 5, Failures: 0, Errors: 0, Skipped: 0
+BUILD SUCCESS
+```
+
+### 10.0.5 阶段四：创建注册请求 DTO
+
+新建 `dto/RegisterRequest.java`：
+
+```java
+package com.Shuan.spring_boot_study.dto;
+
+import jakarta.validation.constraints.Email;
+import jakarta.validation.constraints.NotBlank;
+import jakarta.validation.constraints.Size;
+
+public record RegisterRequest(
+        @NotBlank(message = "用户名不能为空")
+        @Size(min = 2, max = 50, message = "用户名长度必须在2到50个字符之间")
+        String name,
+
+        @NotBlank(message = "邮箱不能为空")
+        @Email(message = "邮箱格式不正确")
+        String email,
+
+        @NotBlank(message = "密码不能为空")
+        @Size(min = 8, max = 72, message = "密码长度必须在8到72个字符之间")
+        String password
+) {
+}
+```
+
+#### 实际错误：`<identifier> expected` 和 `illegal start of expression`
+
+错误写法：
+
+```java
+public record RegisterRequest() {
+    @NotBlank
+    String name,
+    // ...
+}
+```
+
+`RegisterRequest()` 表示这个 record 没有任何组件。record 的 `name`、`email`、`password` 必须声明在圆括号内，不能像普通字段一样用逗号写在 `{}` 类体中。正确结构是：
+
+```java
+public record RegisterRequest(
+        String name,
+        String email,
+        String password
+) {
+}
+```
+
+注解直接放在各组件前。邮箱格式应使用 `@Email`，`@Size` 用来检查字符串长度，不能检查邮箱格式。修正后运行 `./mvnw test -DskipTests`，结果为 `BUILD SUCCESS`。
+
+BCrypt 只使用密码前 72 bytes。学习项目先限制为 72 个字符；真实项目还应明确字符与 UTF-8 bytes 的差异。
+
+### 10.0.6 阶段五：Repository 支持按邮箱查询
+
+在 `UserRepository` 添加：
+
+```java
+Optional<User> findByEmailIgnoreCase(String email);
+```
+
+已有的 `existsByEmailIgnoreCase` 用于注册前快速检查；数据库唯一约束仍然是并发情况下的最终防线。
+
+### 10.0.7 阶段六：完成注册 Service
+
+修正 `AuthService`：
+
+```java
+package com.Shuan.spring_boot_study.service;
+
+import com.Shuan.spring_boot_study.dto.RegisterRequest;
+import com.Shuan.spring_boot_study.dto.UserResponse;
+import com.Shuan.spring_boot_study.exception.DuplicateEmailException;
+import com.Shuan.spring_boot_study.model.User;
+import com.Shuan.spring_boot_study.repository.UserRepository;
+import org.springframework.security.crypto.password.PasswordEncoder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+
+@Service
+public class AuthService {
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public AuthService(
+            UserRepository userRepository,
+            PasswordEncoder passwordEncoder
+    ) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    @Transactional
+    public UserResponse register(RegisterRequest request) {
+        String normalizedEmail = request.email().trim().toLowerCase();
+
+        if (userRepository.existsByEmailIgnoreCase(normalizedEmail)) {
+            throw new DuplicateEmailException(normalizedEmail);
+        }
+
+        String passwordHash = passwordEncoder.encode(request.password());
+        User user = new User(
+                request.name().trim(),
+                normalizedEmail,
+                passwordHash
+        );
+
+        return UserResponse.from(userRepository.save(user));
+    }
+}
+```
+
+完成这里后先执行：
+
+```bash
+./mvnw test -DskipTests
+```
+
+必须先恢复 `BUILD SUCCESS`，再继续 Controller。
+
+### 10.0.8 阶段七：创建注册 Controller
+
+新建 `controller/AuthController.java`：
+
+```java
+package com.Shuan.spring_boot_study.controller;
+
+import com.Shuan.spring_boot_study.dto.RegisterRequest;
+import com.Shuan.spring_boot_study.dto.UserResponse;
+import com.Shuan.spring_boot_study.service.AuthService;
+import jakarta.validation.Valid;
+import org.springframework.http.HttpStatus;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.ResponseStatus;
+import org.springframework.web.bind.annotation.RestController;
+
+@RestController
+@RequestMapping("/api/auth")
+public class AuthController {
+    private final AuthService authService;
+
+    public AuthController(AuthService authService) {
+        this.authService = authService;
+    }
+
+    @PostMapping("/register")
+    @ResponseStatus(HttpStatus.CREATED)
+    public UserResponse register(@Valid @RequestBody RegisterRequest request) {
+        return authService.register(request);
+    }
+}
+```
+
+#### 实际错误：`cannot find symbol class Vaild`
+
+错误写法：
+
+```java
+public UserResponse register(@Vaild @RequestBody RegisterRequest request)
+```
+
+正确写法：
+
+```java
+import jakarta.validation.Valid;
+
+public UserResponse register(@Valid @RequestBody RegisterRequest request)
+```
+
+`Valid` 的字母顺序是 `Val-id`，不是 `Vaild`。Java 会把错误拼写当成一个不存在的新类型，因此报告 `cannot find symbol`。修正后 `./mvnw test -DskipTests` 编译成功。
+
+### 10.0.9 阶段八：先配置最小 SecurityFilterChain
+
+添加 Security 依赖后，Spring 默认会保护所有接口。为了先验证注册功能，在 `SecurityConfig` 添加：
+
+```java
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.config.Customizer;
+import org.springframework.security.config.annotation.web.builders.HttpSecurity;
+import org.springframework.security.config.http.SessionCreationPolicy;
+import org.springframework.security.web.SecurityFilterChain;
+
+@Bean
+public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Exception {
+    return http
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                    .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                    .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
+                    .anyRequest().authenticated())
+            .httpBasic(Customizer.withDefaults())
+            .build();
+}
+```
+
+这里的 HTTP Basic 只是阶段性调试配置。JWT 完成后会移除它并启用 OAuth2 Resource Server。
+
+启动并测试注册：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"name":"Alice","email":"alice@example.com","password":"password123"}' \
+  http://localhost:8080/api/auth/register
+```
+
+预期 `201`，响应中绝不能出现 `password` 或 `passwordHash`。
+
+数据库验证：
+
+```sql
+SELECT id, name, email, password_hash, role
+FROM app_users;
+```
+
+`password_hash` 应以 `$2` 开头，不应等于 `password123`。
+
+### 10.0.10 阶段九：登录 DTO 与错误
+
+新建 `LoginRequest.java`：
+
+```java
+public record LoginRequest(
+        @NotBlank @Email String email,
+        @NotBlank String password
+) {
+}
+```
+
+新建 `AuthResponse.java`：
+
+```java
+public record AuthResponse(
+        String accessToken,
+        String tokenType,
+        long expiresIn
+) {
+}
+```
+
+新建 `InvalidCredentialsException`，统一返回“邮箱或密码错误”，不要分别透露邮箱是否存在，避免账号枚举。
+
+登录的核心判断：
+
+```java
+User user = userRepository.findByEmailIgnoreCase(request.email().trim())
+        .orElseThrow(InvalidCredentialsException::new);
+
+if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+    throw new InvalidCredentialsException();
+}
+```
+
+到这里仅完成身份校验；下一阶段再签发 JWT。
+
+### 10.0.11 阶段十：JWT 配置与签发
+
+JWT 密钥必须来自环境变量：
+
+```properties
+security.jwt.secret=${JWT_SECRET}
+security.jwt.expiration-seconds=3600
+```
+
+`JWT_SECRET` 至少使用 32 bytes 随机内容，不要提交到 Git。IDEA Run Configuration 需要同时配置 `DB_PASSWORD` 与 `JWT_SECRET`。
+
+JWT 中至少放入：
+
+```text
+sub   用户 ID 或邮箱
+role  USER / ADMIN
+iat   签发时间
+exp   过期时间
+```
+
+`JwtService` 负责创建 token；`AuthService.login()` 只负责查用户、校验密码并调用 `JwtService`。不要把 JWT 生成代码堆进 Controller。
+
+完成 Encoder/Decoder 后，将阶段性的 HTTP Basic 替换为：
+
+```java
+.oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+```
+
+并配置 JWT authority converter，把 `role=ADMIN` 转成 `ROLE_ADMIN`，否则 `hasRole("ADMIN")` 无法匹配。
+
+### 10.0.12 阶段十一：最终权限规则
+
+```java
+.authorizeHttpRequests(auth -> auth
+        .requestMatchers("/api/auth/register", "/api/auth/login").permitAll()
+        .requestMatchers(HttpMethod.GET, "/api/users/**").hasAnyRole("USER", "ADMIN")
+        .requestMatchers("/api/users/**").hasRole("ADMIN")
+        .anyRequest().authenticated())
+```
+
+规则必须从具体到宽泛排列。若先写 `/api/users/**` 的宽泛规则，后面的 GET 专用规则可能不会按预期生效。
+
+### 10.0.13 阶段十二：验证矩阵
+
+| 场景 | 预期 |
+|---|---:|
+| 注册合法用户 | 201 |
+| 重复邮箱注册 | 409 |
+| 密码不足 8 位 | 400 |
+| 正确邮箱密码登录 | 200 + token |
+| 错误密码登录 | 401 |
+| 无 token 查询用户 | 401 |
+| USER token 查询用户 | 200 |
+| USER token 删除用户 | 403 |
+| ADMIN token 删除用户 | 204 |
+| token 过期或签名错误 | 401 |
+
+### 10.0.14 为什么本任务拆成这些阶段？
+
+认证错误通常来自不同层：数据库列、Bean 注入、密码校验、JWT 签名、JWT 解析、角色映射或 URL 规则。如果一次写完再运行，错误会叠在一起。逐阶段验证能够明确每个问题属于哪一层。
+
 ### 10.1 实现顺序
 
 Spring Security 内容较多，按以下顺序实现：
@@ -5499,6 +6093,113 @@ Spring Security 内容较多，按以下顺序实现：
 ### 10.3 密码存储
 
 User 增加 `passwordHash`，不保存明文密码，也不在 `UserResponse` 中返回。
+
+`PasswordEncoder` 不是写在 `User` 实体中的方法。新建：
+
+```text
+src/main/java/com/Shuan/spring_boot_study/config/SecurityConfig.java
+```
+
+完整注册代码：
+
+```java
+package com.Shuan.spring_boot_study.config;
+
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
+import org.springframework.security.crypto.password.PasswordEncoder;
+
+@Configuration
+public class SecurityConfig {
+
+    @Bean
+    public PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+含义：
+
+- `@Configuration` 告诉 Spring 这是配置类；
+- `@Bean` 将方法返回的 `BCryptPasswordEncoder` 对象注册进 Spring 容器；
+- Bean 的类型是 `PasswordEncoder`，默认名称是 `passwordEncoder`；
+- Spring 启动时只创建并管理这个对象，Service 不需要自己 `new BCryptPasswordEncoder()`。
+
+在负责注册用户的 Service 中通过构造器注入：
+
+```java
+import org.springframework.security.crypto.password.PasswordEncoder;
+
+@Service
+public class AuthService {
+    private final UserRepository userRepository;
+    private final PasswordEncoder passwordEncoder;
+
+    public AuthService(
+            UserRepository userRepository,
+            PasswordEncoder passwordEncoder
+    ) {
+        this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
+    }
+
+    public UserResponse register(RegisterRequest request) {
+        String passwordHash = passwordEncoder.encode(request.password());
+        // 使用 name、email、passwordHash 创建并保存 User
+        // 不要保存 request.password() 明文
+        return null;
+    }
+}
+```
+
+下面这种写法位置错误，不要放在 `User` 中：
+
+```java
+@Entity
+public class User {
+    @Bean
+    PasswordEncoder passwordEncoder() {
+        return new BCryptPasswordEncoder();
+    }
+}
+```
+
+`User` 是 JPA 实体，由 JPA 表示数据库中的一行数据；它不是负责装配应用依赖的 Spring 配置类。实体只应保存字段和领域行为。
+
+注册时真正执行：
+
+```java
+String passwordHash = passwordEncoder.encode(request.password());
+```
+
+这里的 `passwordEncoder` 就是构造器参数中由 Spring 注入的 Bean。登录时使用同一个接口验证：
+
+```java
+boolean matched = passwordEncoder.matches(
+        request.password(),
+        user.getPasswordHash()
+);
+```
+
+不能将用户本次输入再次 `encode()` 后与数据库字符串直接比较，因为 BCrypt 每次编码会使用新的随机盐，即使明文相同，生成的哈希通常也不同。
+
+简化调用链：
+
+```text
+SecurityConfig 创建 PasswordEncoder Bean
+                ↓
+Spring 容器保存 Bean
+                ↓
+Spring 创建 AuthService 时通过构造器注入
+                ↓
+register() 调用 passwordEncoder.encode(...)
+                ↓
+数据库只保存 passwordHash
+```
+
+最小注册方法仍然是：
 
 ```java
 @Bean

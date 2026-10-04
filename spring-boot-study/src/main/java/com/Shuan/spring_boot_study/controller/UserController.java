@@ -60,7 +60,7 @@ public class UserController {
     @ResponseStatus(HttpStatus.CREATED)
     public UserResponse create (@Valid @RequestBody CreateUserRequest request) {
         return UserResponse.from(
-                userService.create(request.name(), request.email())
+                userService.create(request.name(), request.email(), request.password())
         );
     }
 

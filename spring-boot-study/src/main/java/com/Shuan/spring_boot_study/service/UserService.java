@@ -5,6 +5,7 @@ import com.Shuan.spring_boot_study.model.User;
 import com.Shuan.spring_boot_study.repository.UserRepository;
 import jakarta.transaction.Transactional;
 import org.springframework.stereotype.Service;
+import org.springframework.security.crypto.password.PasswordEncoder;
 
 import java.util.List;
 import java.util.Optional;
@@ -20,8 +21,11 @@ import com.Shuan.spring_boot_study.exception.DuplicateEmailException;
 @Service
 public class UserService {
     private final UserRepository userRepository;
-    public UserService(UserRepository userRepository) {
+    private final PasswordEncoder passwordEncoder;
+
+    public UserService(UserRepository userRepository, PasswordEncoder passwordEncoder) {
         this.userRepository = userRepository;
+        this.passwordEncoder = passwordEncoder;
     }
 
 //    public List<User> findAll() {
@@ -40,14 +44,15 @@ public class UserService {
     }
 
     @Transactional
-    public User create(String name, String email) {
+    public User create(String name, String email, String password) {
         String normalizedEmail = normalizeEmail(email);
 
         if (userRepository.existsByEmailIgnoreCase(normalizedEmail)) {
             throw new DuplicateEmailException(normalizedEmail);
         }
 
-        User user = new User(name.strip(), normalizedEmail);
+        String passwordHash = passwordEncoder.encode(password);
+        User user = new User(name.strip(), normalizedEmail, passwordHash);
         return userRepository.save(user);
     }
     public User findByIdOrThrow(Long id) {
