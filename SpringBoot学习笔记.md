@@ -6862,18 +6862,173 @@ curl -i \
 
 ## 11. Task 19：文档、监控、Docker 与 CI
 
-### 11.1 OpenAPI / Swagger
+### 11.0 开始条件与最终目标
 
-添加与当前 Spring Boot 主版本兼容的 springdoc 依赖，启动后检查：
+先完成 Task 18 的登录、JWT 和权限验证，并确保：
 
-```text
-/v3/api-docs
-/swagger-ui/index.html
+```bash
+cd spring-boot-study
+./mvnw test
 ```
 
-为请求 DTO 和主要 Controller 添加说明，确保 400、401、403、404 和 409 也出现在 API 文档中。
+结果为 `BUILD SUCCESS`。Task 19 完成后应具备：
 
-### 11.2 Actuator
+```text
+Swagger UI        查看和调试 API
+Actuator          提供健康检查
+可执行 Jar         可脱离 IDEA 运行
+Dockerfile        将应用制作成镜像
+Docker Compose    一次启动应用和 MySQL
+GitHub Actions    每次 push 自动测试
+```
+
+每个阶段独立验证，不要一次把所有依赖和文件全部加入后才运行。
+
+### 11.1 阶段一：OpenAPI / Swagger UI
+
+#### 11.1.1 添加依赖
+
+当前项目是 Spring Boot 4.1.1，应使用 springdoc-openapi 3.x。官方项目说明 Boot 4 对应 springdoc 3.x；本教程使用与 Boot 4.1 对齐的 3.1.1：
+
+```xml
+<dependency>
+    <groupId>org.springdoc</groupId>
+    <artifactId>springdoc-openapi-starter-webmvc-ui</artifactId>
+    <version>3.1.1</version>
+</dependency>
+```
+
+添加到 `pom.xml` 的 `<dependencies>` 中，然后验证依赖和编译：
+
+```bash
+./mvnw test -DskipTests
+```
+
+#### 11.1.2 配置文档路径
+
+在 `application.properties` 添加：
+
+```properties
+springdoc.api-docs.path=/v3/api-docs
+springdoc.swagger-ui.path=/swagger-ui.html
+springdoc.swagger-ui.operations-sorter=method
+```
+
+#### 11.1.3 允许访问文档路径
+
+当前项目启用了 Spring Security。如果不放行文档资源，浏览器会得到 401。在 `SecurityConfig` 的 `authorizeHttpRequests` 中，将文档规则放在 `anyRequest()` 前：
+
+```java
+.requestMatchers(
+        "/v3/api-docs/**",
+        "/swagger-ui.html",
+        "/swagger-ui/**"
+).permitAll()
+```
+
+学习环境可以匿名查看；真实生产环境通常应关闭 Swagger UI，或只允许管理员/内网访问。
+
+##### 实际错误：访问 `/v3/api-docs` 返回 Bearer 401
+
+错误规则少了最后的 `s`：
+
+```java
+"/v3/api-doc/**"  // 错误
+"/v3/api-docs/**" // 正确
+```
+
+由于字符串路径不会在编译期检查，这种拼写错误仍然能 `BUILD SUCCESS`。请求没有命中 `permitAll()` 后，会继续匹配 `anyRequest().authenticated()`，因此 Resource Server 返回 401。修正规则并重启应用后再验证。
+
+#### 11.1.4 添加 OpenAPI 基本信息和 Bearer 认证按钮
+
+新建：
+
+```text
+src/main/java/com/Shuan/spring_boot_study/config/OpenApiConfig.java
+```
+
+```java
+package com.Shuan.spring_boot_study.config;
+
+import io.swagger.v3.oas.models.Components;
+import io.swagger.v3.oas.models.OpenAPI;
+import io.swagger.v3.oas.models.info.Info;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
+import io.swagger.v3.oas.models.security.SecurityScheme;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+
+@Configuration
+public class OpenApiConfig {
+    private static final String BEARER_AUTH = "bearerAuth";
+
+    @Bean
+    public OpenAPI applicationOpenApi() {
+        return new OpenAPI()
+                .info(new Info()
+                        .title("Spring Boot Study API")
+                        .version("v1")
+                        .description("用户注册、登录与用户管理 API"))
+                .addSecurityItem(
+                        new SecurityRequirement().addList(BEARER_AUTH)
+                )
+                .components(new Components().addSecuritySchemes(
+                        BEARER_AUTH,
+                        new SecurityScheme()
+                                .type(SecurityScheme.Type.HTTP)
+                                .scheme("bearer")
+                                .bearerFormat("JWT")
+                ));
+    }
+}
+```
+
+Swagger UI 右上角将出现 `Authorize`。输入 token 时通常只粘贴 JWT 本身，不要重复输入 `Bearer`，UI 会自动形成请求头。
+
+#### 11.1.5 给接口增加说明
+
+先从 `AuthController` 做最小示例：
+
+```java
+@Operation(summary = "注册用户")
+@ApiResponses({
+        @ApiResponse(responseCode = "201", description = "注册成功"),
+        @ApiResponse(responseCode = "400", description = "参数校验失败"),
+        @ApiResponse(responseCode = "409", description = "邮箱已存在")
+})
+@PostMapping("/register")
+```
+
+所需 imports：
+
+```java
+import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.responses.ApiResponse;
+import io.swagger.v3.oas.annotations.responses.ApiResponses;
+```
+
+不要一开始给所有类堆满注解。先让自动生成工作，再只补自动推断不出的业务含义和错误码。
+
+#### 11.1.6 启动并验证
+
+重启 dev 应用，访问：
+
+```text
+http://localhost:8081/v3/api-docs
+http://localhost:8081/swagger-ui.html
+```
+
+命令行验证 JSON：
+
+```bash
+curl -i http://localhost:8081/v3/api-docs
+```
+
+验收：JSON 中能找到 `/api/auth/register`、`/api/auth/login`、`/api/users`；Swagger UI 能打开且不返回 401。
+
+### 11.2 阶段二：Actuator 健康检查
+
+#### 11.2.1 添加依赖
 
 ```xml
 <dependency>
@@ -6882,77 +7037,338 @@ curl -i \
 </dependency>
 ```
 
-只暴露必要端点：
+#### 11.2.2 最小安全配置
+
+在 `application.properties` 添加：
 
 ```properties
 management.endpoints.web.exposure.include=health,info
 management.endpoint.health.show-details=never
 ```
 
-验证：
+`exposure.include` 决定允许通过 HTTP 暴露哪些 Actuator 端点。不要使用 `*` 暴露全部管理信息。
 
-```bash
-curl -i http://localhost:8080/actuator/health
+在 SecurityConfig 放行健康检查：
+
+```java
+.requestMatchers("/actuator/health").permitAll()
 ```
 
-### 11.3 Dockerfile
+如果希望 `/actuator/info` 仅登录后可见，不要把整个 `/actuator/**` 都设为 permitAll。
+
+#### 11.2.3 验证
+
+重启应用：
+
+```bash
+curl -i http://localhost:8081/actuator/health
+```
+
+预期：
+
+```json
+{"status":"UP"}
+```
+
+数据库停止时可能变成 `DOWN` 并返回 503，这正是容器平台用健康检查发现故障的方式。
+
+### 11.3 阶段三：先构建可执行 Jar
+
+#### 11.3.1 修正测试环境配置
+
+JWT 配置加入后，测试不能依赖开发者终端里的 `JWT_SECRET`。在 `src/test/resources/application-test.properties` 放置只用于测试的固定 Base64 密钥：
+
+```properties
+spring.datasource.url=jdbc:h2:mem:testdb
+spring.datasource.driver-class-name=org.h2.Driver
+spring.datasource.username=sa
+spring.datasource.password=
+spring.jpa.hibernate.ddl-auto=create-drop
+spring.jpa.open-in-view=false
+spring.flyway.enabled=false
+security.jwt.secret=MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+security.jwt.expiration-seconds=3600
+```
+
+这个密钥仅用于测试，不得在生产使用。确保 `spring.flyway.enabled=false` 单独占一行。
+
+#### 11.3.2 执行完整构建
+
+```bash
+cd spring-boot-study
+./mvnw clean verify
+```
+
+`verify` 会编译主代码、编译测试、运行测试并构建 Jar。成功后检查：
+
+```bash
+ls -lh target/*.jar
+```
+
+#### 11.3.3 不通过 IDEA 运行 Jar
+
+先准备环境变量：
+
+```bash
+export DB_PASSWORD='你的数据库密码'
+export JWT_SECRET='openssl生成的Base64密钥'
+```
+
+运行：
+
+```bash
+java -jar target/spring-boot-study-0.0.1-SNAPSHOT.jar \
+  --spring.profiles.active=dev
+```
+
+这一步能证明项目并不依赖 IDEA。验证后按 `Ctrl+C` 停止。
+
+### 11.4 阶段四：Dockerfile
+
+#### 11.4.1 确认 Docker 可用
+
+先启动 Docker Desktop，再执行：
+
+```bash
+docker version
+docker info
+```
+
+如果只有 Client 信息或提示无法连接 daemon，说明 Docker Desktop 尚未启动。
+
+#### 11.4.2 创建 `.dockerignore`
+
+在 `spring-boot-study/.dockerignore`：
+
+```text
+target/
+.idea/
+.git/
+*.iml
+```
+
+#### 11.4.3 创建多阶段 Dockerfile
+
+在 `spring-boot-study/Dockerfile`：
 
 ```dockerfile
+FROM eclipse-temurin:25-jdk AS build
+WORKDIR /workspace
+COPY . .
+RUN chmod +x mvnw && ./mvnw -B -DskipTests clean package
+
 FROM eclipse-temurin:25-jre
 WORKDIR /app
-COPY target/spring-boot-study-0.0.1-SNAPSHOT.jar app.jar
+COPY --from=build /workspace/target/spring-boot-study-0.0.1-SNAPSHOT.jar app.jar
 EXPOSE 8080
 ENTRYPOINT ["java", "-jar", "app.jar"]
 ```
 
-先构建 Jar，再构建镜像：
+第一阶段使用 JDK 编译，第二阶段只使用 JRE 运行。镜像中不包含源代码构建工具层之外的运行依赖。
+
+#### 11.4.4 构建镜像
+
+必须在包含 Dockerfile 的模块目录运行：
 
 ```bash
-./mvnw clean package
-docker build -t spring-boot-study .
+cd spring-boot-study
+docker build -t spring-boot-study:local .
+docker image ls spring-boot-study
 ```
 
-### 11.4 Docker Compose
+暂时不要急着单独 `docker run` 连接本机 MySQL；下一阶段用 Compose 同时管理应用与数据库，更容易复现。
 
-Compose 至少包含 `app` 和 `mysql` 两个服务。应用内的数据库地址使用服务名：
+### 11.5 阶段五：Docker Compose 启动应用和 MySQL
+
+#### 11.5.1 创建本地 `.env`
+
+在 `spring-boot-study/.env`：
+
+```dotenv
+MYSQL_ROOT_PASSWORD=仅本地使用的root密码
+MYSQL_PASSWORD=仅本地使用的spring_user密码
+JWT_SECRET=openssl生成的Base64密钥
+```
+
+将 `.env` 加入 `.gitignore`：
 
 ```text
-jdbc:mysql://mysql:3306/spring_boot_study
+.env
 ```
 
-容器内的 `localhost` 指向当前容器，不是 MySQL 容器。密码通过环境变量提供。
+提交一个不含真实密码的 `.env.example`：
+
+```dotenv
+MYSQL_ROOT_PASSWORD=change-me
+MYSQL_PASSWORD=change-me
+JWT_SECRET=base64-encoded-32-byte-secret
+```
+
+#### 11.5.2 创建 `compose.yaml`
+
+在 `spring-boot-study/compose.yaml`：
+
+```yaml
+services:
+  mysql:
+    image: mysql:8.0
+    environment:
+      MYSQL_DATABASE: spring_boot_study
+      MYSQL_USER: spring_user
+      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+    volumes:
+      - mysql-data:/var/lib/mysql
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-uroot", "-p${MYSQL_ROOT_PASSWORD}"]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+
+  app:
+    build: .
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      SPRING_PROFILES_ACTIVE: prod
+      DB_URL: jdbc:mysql://mysql:3306/spring_boot_study?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai
+      DB_USERNAME: spring_user
+      DB_PASSWORD: ${MYSQL_PASSWORD}
+      JWT_SECRET: ${JWT_SECRET}
+      SERVER_PORT: 8080
+    ports:
+      - "8081:8080"
+
+volumes:
+  mysql-data:
+```
+
+容器中的 `localhost` 只指当前容器。应用通过 Compose 服务名 `mysql` 找到数据库。
+
+#### 11.5.3 启动和观察
+
+先停止 IDEA 中占用 8081 的应用，然后：
 
 ```bash
 docker compose up --build
-docker compose ps
-curl -i http://localhost:8080/actuator/health
 ```
 
-### 11.5 CI
+另开终端：
 
-GitHub Actions 的基本步骤：
+```bash
+docker compose ps
+docker compose logs -f app
+curl -i http://localhost:8081/actuator/health
+```
+
+首次启动时，Flyway 会对全新容器数据库依次执行 V1、V2、V3、V4。
+
+停止但保留数据：
+
+```bash
+docker compose down
+```
+
+停止并删除数据库 volume（会丢失容器数据库数据）：
+
+```bash
+docker compose down -v
+```
+
+`-v` 是破坏性操作，只在明确需要重建本地练习数据库时使用。
+
+### 11.6 阶段六：GitHub Actions CI
+
+#### 11.6.1 创建工作流文件
+
+从仓库根目录创建：
+
+```text
+.github/workflows/ci.yml
+```
+
+注意 `.github` 位于 `SprintBootProject` 仓库根目录，不在 Maven 模块内部。
 
 ```yaml
-- uses: actions/checkout@v4
-- uses: actions/setup-java@v4
-  with:
-    distribution: temurin
-    java-version: '25'
-    cache: maven
-- run: ./mvnw verify
-  working-directory: spring-boot-study
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: spring-boot-study
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "25"
+          cache: maven
+          cache-dependency-path: spring-boot-study/pom.xml
+
+      - name: Ensure Maven wrapper is executable
+        run: chmod +x mvnw
+
+      - name: Test and verify
+        run: ./mvnw --batch-mode clean verify
 ```
 
-CI 使用 H2 或临时 MySQL service container，不能依赖开发者本机数据库。
+测试使用 H2 和 `application-test.properties`，因此 CI 不依赖你的本机 MySQL，也不需要把真实数据库密码配置到 GitHub。
 
-### 11.6 完成检查
+#### 11.6.2 本地模拟 CI
 
-- [ ] Swagger UI 可访问，且接口信息正确。
-- [ ] `/actuator/health` 返回 UP。
-- [ ] Docker 镜像能独立启动。
-- [ ] Compose 能同时启动应用和 MySQL。
-- [ ] GitHub Actions 能自动执行 `./mvnw verify`。
-- [ ] 日志和仓库中没有敏感信息。
+提交前执行：
+
+```bash
+cd spring-boot-study
+./mvnw --batch-mode clean verify
+```
+
+GitHub 页面打开仓库的 `Actions` 标签查看结果。失败时展开 `Test and verify`，寻找第一条 `ERROR`，不要只看最后一行 `Process completed with exit code 1`。
+
+### 11.7 推荐提交顺序
+
+不要把所有 Task 19 内容塞入一个难以审查的提交：
+
+```text
+1. add OpenAPI documentation
+2. add Actuator health endpoint
+3. add Docker image and Compose environment
+4. add GitHub Actions CI workflow
+```
+
+每次提交前：
+
+```bash
+./mvnw test
+git diff --check
+git status
+```
+
+### 11.8 完成检查
+
+- [ ] `./mvnw clean verify` 成功。
+- [ ] Swagger UI 可访问并列出真实接口。
+- [ ] Swagger Authorize 能携带 JWT 调用受保护接口。
+- [ ] `/actuator/health` 返回 `UP`。
+- [ ] `java -jar` 可以脱离 IDEA 运行。
+- [ ] Docker 镜像构建成功。
+- [ ] Compose 能启动应用与 MySQL。
+- [ ] 全新 Compose 数据库能自动执行 V1～V4。
+- [ ] GitHub Actions 自动执行 `clean verify`。
+- [ ] `.env`、数据库密码和 JWT 密钥未被 Git 跟踪。
+- [ ] Jenkins 使用 8080，学习项目统一通过宿主机 8081 访问。
 
 ## 12. 每一课的执行方式
 
