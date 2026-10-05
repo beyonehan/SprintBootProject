@@ -3,15 +3,14 @@ package com.Shuan.spring_boot_study.controller;
 import com.Shuan.spring_boot_study.dto.LoginRequest;
 import com.Shuan.spring_boot_study.dto.RegisterRequest;
 import com.Shuan.spring_boot_study.dto.UserResponse;
+import com.Shuan.spring_boot_study.dto.AuthResponse;
 import com.Shuan.spring_boot_study.service.AuthService;
 import jakarta.validation.Valid;
 import org.springframework.http.HttpStatus;
-import org.springframework.web.bind.annotation.PostMapping;
-import org.springframework.web.bind.annotation.RequestBody;
-import org.springframework.web.bind.annotation.RequestMapping;
-import org.springframework.web.bind.annotation.ResponseStatus;
-import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.*;
 
+@RestController
+@RequestMapping("/api/auth")
 public class AuthController {
 
     private  final AuthService authService;
@@ -24,8 +23,10 @@ public class AuthController {
     public UserResponse register(@Valid @RequestBody RegisterRequest request) {
         return authService.register(request);
     }
-//    @PostMapping('/login')
-//    public UserResponse login(@Valid @RequestBody LoginRequest loginRequest) {
-//        return  authService.
-//    }
+
+    @PostMapping("/login")
+    public AuthResponse login(@Valid @RequestBody LoginRequest loginRequest) {
+        return  authService.login(loginRequest);
+    }
+
 }

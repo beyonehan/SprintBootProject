@@ -5920,6 +5920,83 @@ public UserResponse register(@Valid @RequestBody RegisterRequest request)
 
 ### 10.0.9 阶段八：先配置最小 SecurityFilterChain
 
+#### SecurityConfig 是怎样自动生效的？
+
+启动类位于根包：
+
+```java
+package com.Shuan.spring_boot_study;
+
+@SpringBootApplication
+public class SpringBootStudyApplication {
+}
+```
+
+`@SpringBootApplication` 包含组件扫描，默认扫描启动类所在包以及所有子包。因此下面的类会被发现：
+
+```text
+com.Shuan.spring_boot_study
+└── config
+    └── SecurityConfig.java
+```
+
+`SecurityConfig` 上的 `@Configuration` 表示它是 Spring 配置类。Spring 启动时执行其中带 `@Bean` 的方法，将返回对象注册进 ApplicationContext：
+
+```java
+@Bean
+PasswordEncoder passwordEncoder()
+```
+
+注册一个 `PasswordEncoder` Bean，之后创建 `AuthService` 时可通过构造器自动注入。
+
+```java
+@Bean
+SecurityFilterChain securityFilterChain(HttpSecurity http)
+```
+
+注册应用的 Web 安全规则。Spring Security 检测到用户提供了 `SecurityFilterChain` 后，使用这条链处理 HTTP 请求，而不再完全采用默认的“所有请求都需要 Basic 登录”规则。
+
+启动阶段：
+
+```text
+SpringApplication.run()
+        ↓
+扫描 @Configuration
+        ↓
+执行 @Bean 方法
+        ↓
+注册 PasswordEncoder、SecurityFilterChain 等 Bean
+        ↓
+Spring Security 将 SecurityFilterChain 接入 Servlet Filter 链
+```
+
+请求阶段：
+
+```text
+curl /api/users
+        ↓
+Tomcat 收到请求
+        ↓
+Spring Security Filter Chain
+        ↓
+验证 Bearer JWT、读取角色、检查 URL 权限
+        ↓ 允许
+DispatcherServlet
+        ↓
+Controller → Service → Repository
+```
+
+如果认证或授权失败，请求会在安全过滤器阶段直接返回 401/403，Controller 不会执行。
+
+以下情况会导致配置看起来没有生效：
+
+- `SecurityConfig` 不在启动类包或子包中；
+- 忘记 `@Configuration`；
+- `SecurityFilterChain` 方法忘记 `@Bean`；
+- 修改代码后没有重启正在运行的应用；
+- curl 请求了 Jenkins 的 8080，而不是项目的 8081；
+- `requestMatchers` 路径写错，例如漏掉开头的 `/`。
+
 添加 Security 依赖后，Spring 默认会保护所有接口。为了先验证注册功能，在 `SecurityConfig` 添加：
 
 ```java
@@ -5946,6 +6023,25 @@ public SecurityFilterChain securityFilterChain(HttpSecurity http) throws Excepti
 
 这里的 HTTP Basic 只是阶段性调试配置。JWT 完成后会移除它并启用 OAuth2 Resource Server。
 
+#### 实际错误：注册接口返回 `401` 和 `WWW-Authenticate: Basic`
+
+响应：
+
+```text
+HTTP/1.1 401
+WWW-Authenticate: Basic realm="Realm"
+Set-Cookie: JSESSIONID=...
+```
+
+这说明请求已经到达 Spring Boot，但项目没有自定义 `SecurityFilterChain`，因此 Spring Security 默认保护所有接口，并启用了默认 Basic 登录。请求在到达 Controller 之前就被拦截。
+
+需要同时满足两个条件：
+
+1. `AuthController` 类上存在 `@RestController` 和 `@RequestMapping("/api/auth")`；
+2. `SecurityFilterChain` 对 `/api/auth/register` 和 `/api/auth/login` 使用 `permitAll()`。
+
+只修 Controller 注解仍会得到 401；只放行路径但 Controller 没注册则会得到 404。修改后必须重启应用，因为正在运行的 JVM 不会自动使用尚未重新加载的配置。
+
 启动并测试注册：
 
 ```bash
@@ -5953,7 +6049,7 @@ curl -i \
   -X POST \
   -H 'Content-Type: application/json' \
   -d '{"name":"Alice","email":"alice@example.com","password":"password123"}' \
-  http://localhost:8080/api/auth/register
+  http://localhost:8081/api/auth/register
 ```
 
 预期 `201`，响应中绝不能出现 `password` 或 `passwordHash`。
@@ -6005,37 +6101,544 @@ if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
 
 到这里仅完成身份校验；下一阶段再签发 JWT。
 
-### 10.0.11 阶段十：JWT 配置与签发
+#### 10.0.10.1 完成 InvalidCredentialsException
 
-JWT 密钥必须来自环境变量：
+当前项目里的异常仍错误地接收用户 ID。认证失败不能告诉客户端“邮箱不存在”还是“密码错误”，否则攻击者可以批量确认哪些邮箱已经注册。
+
+完整代码：
+
+```java
+package com.Shuan.spring_boot_study.exception;
+
+public class InvalidCredentialsException extends RuntimeException {
+    public InvalidCredentialsException() {
+        super("邮箱或密码错误");
+    }
+}
+```
+
+在 `GlobalExceptionHandler` 添加：
+
+```java
+@ExceptionHandler(InvalidCredentialsException.class)
+@ResponseStatus(HttpStatus.UNAUTHORIZED)
+public ApiError handleInvalidCredentials(
+        InvalidCredentialsException exception,
+        HttpServletRequest request
+) {
+    return new ApiError(
+            Instant.now(),
+            HttpStatus.UNAUTHORIZED.value(),
+            HttpStatus.UNAUTHORIZED.getReasonPhrase(),
+            exception.getMessage(),
+            request.getRequestURI(),
+            Map.of()
+    );
+}
+```
+
+### 10.0.11 阶段十：JWT 配置与签发（完整实现）
+
+#### 10.0.11.1 配置密钥和有效期
+
+在 `application.properties` 添加：
 
 ```properties
 security.jwt.secret=${JWT_SECRET}
 security.jwt.expiration-seconds=3600
 ```
 
-`JWT_SECRET` 至少使用 32 bytes 随机内容，不要提交到 Git。IDEA Run Configuration 需要同时配置 `DB_PASSWORD` 与 `JWT_SECRET`。
+生成 32 bytes 随机密钥，输出是 Base64：
 
-JWT 中至少放入：
+```bash
+openssl rand -base64 32
+```
+
+不要把输出写入 Git。命令行启动前导出：
+
+```bash
+export JWT_SECRET='刚生成的Base64字符串'
+```
+
+IDEA 中在 Run Configuration 的 Environment variables 同时配置：
 
 ```text
-sub   用户 ID 或邮箱
-role  USER / ADMIN
-iat   签发时间
-exp   过期时间
+DB_PASSWORD=数据库密码;JWT_SECRET=Base64密钥
 ```
 
-`JwtService` 负责创建 token；`AuthService.login()` 只负责查用户、校验密码并调用 `JwtService`。不要把 JWT 生成代码堆进 Controller。
+重新生成密钥会使之前签发的所有 token 立即失效，这是正常现象。
 
-完成 Encoder/Decoder 后，将阶段性的 HTTP Basic 替换为：
+#### 10.0.11.2 注册 JwtEncoder 和 JwtDecoder
+
+新建 `config/JwtConfig.java`：
 
 ```java
-.oauth2ResourceServer(oauth2 -> oauth2.jwt(Customizer.withDefaults()))
+package com.Shuan.spring_boot_study.config;
+
+import java.util.Base64;
+import javax.crypto.SecretKey;
+import javax.crypto.spec.SecretKeySpec;
+
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.context.annotation.Bean;
+import org.springframework.context.annotation.Configuration;
+import org.springframework.security.oauth2.jose.jws.MacAlgorithm;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtDecoder;
+import org.springframework.security.oauth2.jwt.NimbusJwtEncoder;
+
+@Configuration
+public class JwtConfig {
+
+    @Bean
+    public SecretKey jwtSecretKey(
+            @Value("${security.jwt.secret}") String encodedSecret
+    ) {
+        byte[] keyBytes = Base64.getDecoder().decode(encodedSecret);
+        if (keyBytes.length < 32) {
+            throw new IllegalArgumentException(
+                    "JWT_SECRET 解码后至少需要32字节"
+            );
+        }
+        return new SecretKeySpec(keyBytes, "HmacSHA256");
+    }
+
+    @Bean
+    public JwtEncoder jwtEncoder(SecretKey secretKey) {
+        return NimbusJwtEncoder.withSecretKey(secretKey)
+                .algorithm(MacAlgorithm.HS256)
+                .build();
+    }
+
+    @Bean
+    public JwtDecoder jwtDecoder(SecretKey secretKey) {
+        return NimbusJwtDecoder.withSecretKey(secretKey)
+                .macAlgorithm(MacAlgorithm.HS256)
+                .build();
+    }
+}
 ```
 
-并配置 JWT authority converter，把 `role=ADMIN` 转成 `ROLE_ADMIN`，否则 `hasRole("ADMIN")` 无法匹配。
+`JwtEncoder` 用同一密钥签名，`JwtDecoder` 用它验证签名。HS256 是对称算法，因此密钥绝不能泄露给前端或提交到仓库。
 
-### 10.0.12 阶段十一：最终权限规则
+#### 10.0.11.3 创建 JwtService
+
+新建 `service/JwtService.java`：
+
+```java
+package com.Shuan.spring_boot_study.service;
+
+import java.time.Instant;
+
+import com.Shuan.spring_boot_study.model.User;
+import org.springframework.beans.factory.annotation.Value;
+import org.springframework.security.oauth2.jwt.JwtClaimsSet;
+import org.springframework.security.oauth2.jwt.JwtEncoder;
+import org.springframework.security.oauth2.jwt.JwtEncoderParameters;
+import org.springframework.stereotype.Service;
+
+@Service
+public class JwtService {
+    private final JwtEncoder jwtEncoder;
+    private final long expirationSeconds;
+
+    public JwtService(
+            JwtEncoder jwtEncoder,
+            @Value("${security.jwt.expiration-seconds}") long expirationSeconds
+    ) {
+        this.jwtEncoder = jwtEncoder;
+        this.expirationSeconds = expirationSeconds;
+    }
+
+    public String issueToken(User user) {
+        Instant now = Instant.now();
+        JwtClaimsSet claims = JwtClaimsSet.builder()
+                .issuer("spring-boot-study")
+                .subject(user.getId().toString())
+                .issuedAt(now)
+                .expiresAt(now.plusSeconds(expirationSeconds))
+                .claim("email", user.getEmail())
+                .claim("role", user.getRole().name())
+                .build();
+
+        return jwtEncoder
+                .encode(JwtEncoderParameters.from(claims))
+                .getTokenValue();
+    }
+
+    public long getExpirationSeconds() {
+        return expirationSeconds;
+    }
+}
+```
+
+职责划分：`AuthService` 判断“能不能登录”，`JwtService` 负责“登录成功后发什么 token”。
+
+##### 实际编译错误：`claims(String, String)` 参数不匹配
+
+Spring Security 7.1.1 中：
+
+```java
+.claim("email", value)   // 添加一个 claim
+.claims(map -> { ... })  // 使用 Consumer 批量修改 claim Map
+```
+
+因此下面写法错误：
+
+```java
+.claims("email", user.getEmail())
+```
+
+应改为单数：
+
+```java
+.claim("email", user.getEmail())
+.claim("role", user.getRole().name())
+```
+
+`build()` 已经返回 `JwtClaimsSet`，不能继续 `.toString()`，否则结果变成 String，无法传给 `JwtEncoderParameters.from(claims)`。
+
+#### 10.0.11.4 完成 AuthService.login()
+
+给 `AuthService` 增加字段和构造器参数：
+
+```java
+private final JwtService jwtService;
+
+public AuthService(
+        UserRepository userRepository,
+        PasswordEncoder passwordEncoder,
+        JwtService jwtService
+) {
+    this.userRepository = userRepository;
+    this.passwordEncoder = passwordEncoder;
+    this.jwtService = jwtService;
+}
+```
+
+添加登录方法：
+
+```java
+@Transactional(readOnly = true)
+public AuthResponse login(LoginRequest request) {
+    String normalizedEmail = request.email().trim().toLowerCase();
+
+    User user = userRepository
+            .findByEmailIgnoreCase(normalizedEmail)
+            .orElseThrow(InvalidCredentialsException::new);
+
+    if (!passwordEncoder.matches(
+            request.password(),
+            user.getPasswordHash()
+    )) {
+        throw new InvalidCredentialsException();
+    }
+
+    String accessToken = jwtService.issueToken(user);
+    return new AuthResponse(
+            accessToken,
+            "Bearer",
+            jwtService.getExpirationSeconds()
+    );
+}
+```
+
+##### 实际编译错误：InvalidCredentialsException 构造器参数不匹配
+
+错误的旧异常只提供：
+
+```java
+InvalidCredentialsException(Long id)
+```
+
+但登录代码需要无参数构造器，并且认证错误不能暴露用户 ID 或邮箱是否存在。应改为：
+
+```java
+public InvalidCredentialsException() {
+    super("邮箱或密码错误");
+}
+```
+
+这样 `orElseThrow(InvalidCredentialsException::new)` 和 `new InvalidCredentialsException()` 都能使用同一个安全错误响应。
+
+需要 imports：
+
+```java
+import com.Shuan.spring_boot_study.dto.AuthResponse;
+import com.Shuan.spring_boot_study.dto.LoginRequest;
+import com.Shuan.spring_boot_study.exception.InvalidCredentialsException;
+```
+
+#### 10.0.11.5 完成登录 Controller
+
+在 `AuthController` 添加：
+
+```java
+@PostMapping("/login")
+public AuthResponse login(
+        @Valid @RequestBody LoginRequest request
+) {
+    return authService.login(request);
+}
+```
+
+不要使用单引号：
+
+```java
+@PostMapping('/login')  // 错误，Java 单引号只能表示一个 char
+@PostMapping("/login") // 正确
+```
+
+#### 10.0.11.6 编译与登录验证
+
+```bash
+./mvnw test -DskipTests
+```
+
+重启应用后：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"password123"}' \
+  http://localhost:8081/api/auth/login
+```
+
+正确密码预期 `200`：
+
+```json
+{
+  "accessToken": "eyJ...",
+  "tokenType": "Bearer",
+  "expiresIn": 3600
+}
+```
+
+错误密码预期 `401`：
+
+```bash
+curl -i \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"wrong-password"}' \
+  http://localhost:8081/api/auth/login
+```
+
+##### 实际情况：刚实现登录，使用 `alice@example.com/password123` 却返回 401
+
+如果 Alice 在 V4 之前已经存在，V4 只会给这个旧用户写入迁移占位哈希。随后再次注册 Alice 会因为邮箱重复返回 409，并不会把新输入的 `password123` 更新到旧用户。因此登录返回统一的“邮箱或密码错误”是正确行为，不代表 JWT 或 Security 配置失败。
+
+验证登录应使用同一组全新凭据连续执行：
+
+```text
+先用新邮箱注册成功（201）
+          ↓
+再用完全相同的邮箱和密码登录（200）
+```
+
+旧用户的正式处理方案应是密码重置，而不是在 SQL 中保存明文密码，也不应让重复注册偷偷覆盖已有密码。
+
+### 10.0.12 阶段十一：让 Spring Security 验证 JWT 和角色
+
+#### 10.0.12.1 创建角色转换器
+
+JWT 中保存的是：
+
+```json
+{"role":"USER"}
+```
+
+但 `hasRole("USER")` 实际检查 authority `ROLE_USER`。在 `SecurityConfig` 添加：
+
+```java
+@Bean
+public JwtAuthenticationConverter jwtAuthenticationConverter() {
+    JwtGrantedAuthoritiesConverter authoritiesConverter =
+            new JwtGrantedAuthoritiesConverter();
+    authoritiesConverter.setAuthoritiesClaimName("role");
+    authoritiesConverter.setAuthorityPrefix("ROLE_");
+
+    JwtAuthenticationConverter authenticationConverter =
+            new JwtAuthenticationConverter();
+    authenticationConverter.setJwtGrantedAuthoritiesConverter(
+            authoritiesConverter
+    );
+    return authenticationConverter;
+}
+```
+
+##### 实际编译错误：在错误对象上调用角色转换 setter
+
+错误写法：
+
+```java
+authoritiesConverter.setJwtGrantedAuthoritiesConverter(
+        authenticationConverter
+);
+```
+
+两个对象的职责方向相反：
+
+```text
+JwtGrantedAuthoritiesConverter
+    负责把 role claim 转成 GrantedAuthority
+                ↓ 设置给
+JwtAuthenticationConverter
+    负责把整个 Jwt 转成 Authentication
+```
+
+因此正确调用是：
+
+```java
+authenticationConverter.setJwtGrantedAuthoritiesConverter(
+        authoritiesConverter
+);
+```
+
+同时路径规则必须以 `/` 开头：
+
+```java
+"/api/auth/login" // 正确
+"api/auth/login"  // 错误，可能导致登录未被 permitAll
+```
+
+imports：
+
+```java
+import org.springframework.security.oauth2.server.resource.authentication.JwtAuthenticationConverter;
+import org.springframework.security.oauth2.server.resource.authentication.JwtGrantedAuthoritiesConverter;
+```
+
+#### 10.0.12.2 替换临时 HTTP Basic 配置
+
+最终 `SecurityFilterChain` 的核心部分：
+
+```java
+@Bean
+public SecurityFilterChain securityFilterChain(
+        HttpSecurity http,
+        JwtAuthenticationConverter jwtAuthenticationConverter
+) throws Exception {
+    return http
+            .csrf(csrf -> csrf.disable())
+            .sessionManagement(session -> session
+                    .sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+            .authorizeHttpRequests(auth -> auth
+                    .requestMatchers(
+                            "/api/auth/register",
+                            "/api/auth/login"
+                    ).permitAll()
+                    .requestMatchers(HttpMethod.GET, "/api/users/**")
+                    .hasAnyRole("USER", "ADMIN")
+                    .requestMatchers("/api/users/**")
+                    .hasRole("ADMIN")
+                    .anyRequest().authenticated())
+            .oauth2ResourceServer(oauth2 -> oauth2
+                    .jwt(jwt -> jwt.jwtAuthenticationConverter(
+                            jwtAuthenticationConverter
+                    )))
+            .build();
+}
+```
+
+同时删除：
+
+```java
+.httpBasic(Customizer.withDefaults())
+```
+
+添加 import：
+
+```java
+import org.springframework.http.HttpMethod;
+```
+
+请求规则从具体到宽泛排列：先 GET，再匹配所有 `/api/users/**` 修改操作。
+
+#### 10.0.12.3 保存并使用 token
+
+如果安装了 `jq`，可以直接提取：
+
+```bash
+export ACCESS_TOKEN=$(curl -s \
+  -X POST \
+  -H 'Content-Type: application/json' \
+  -d '{"email":"alice@example.com","password":"password123"}' \
+  http://localhost:8081/api/auth/login | jq -r '.accessToken')
+```
+
+检查变量是否有值，但不要把完整 token 发到聊天或提交到 Git：
+
+```bash
+echo ${#ACCESS_TOKEN}
+```
+
+不带 token：
+
+```bash
+curl -i http://localhost:8081/api/users
+```
+
+预期 `401`。
+
+携带 token：
+
+```bash
+curl -i \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  http://localhost:8081/api/users
+```
+
+Alice 默认是 `USER`，GET 预期 `200`。如果用 Alice 的 token 删除用户：
+
+```bash
+curl -i \
+  -X DELETE \
+  -H "Authorization: Bearer $ACCESS_TOKEN" \
+  http://localhost:8081/api/users/1
+```
+
+预期 `403`，因为 token 有效但角色不足。
+
+#### 10.0.12.4 401 与 403 的区别
+
+```text
+401：我不知道你是谁
+     没 token、token 伪造、签名错误、token 过期
+
+403：我知道你是谁，但你没有权限
+     USER 已登录，却访问 ADMIN 操作
+```
+
+#### 10.0.12.5 本阶段测试顺序
+
+不要只依赖手动 curl，下一步补自动化测试：
+
+1. 注册成功返回 201，响应不包含密码；
+2. 重复邮箱返回 409；
+3. 正确密码登录返回 token；
+4. 错误邮箱和错误密码都返回相同的 401；
+5. 无 token 访问受保护接口返回 401；
+6. USER token GET 返回 200；
+7. USER token 修改或删除返回 403；
+8. 过期或错误签名 token 返回 401。
+
+### 10.0.13 登录与 JWT 完成检查
+
+- [ ] `JWT_SECRET` 来自环境变量且未提交到 Git。
+- [ ] 正确密码登录返回 `accessToken`、`Bearer` 和有效期。
+- [ ] 错误邮箱与错误密码都返回相同的 401。
+- [ ] 数据库和 API 响应均不暴露明文密码。
+- [ ] Security 不再使用临时 HTTP Basic。
+- [ ] 无 token 访问用户接口返回 401。
+- [ ] USER token 可以执行 GET。
+- [ ] USER token 不能执行修改和删除。
+- [ ] ADMIN token 可以执行管理操作。
+- [ ] `./mvnw test` 完整通过。
+
+### 10.0.14 最终权限规则摘要
 
 ```java
 .authorizeHttpRequests(auth -> auth
@@ -6047,7 +6650,7 @@ exp   过期时间
 
 规则必须从具体到宽泛排列。若先写 `/api/users/**` 的宽泛规则，后面的 GET 专用规则可能不会按预期生效。
 
-### 10.0.13 阶段十二：验证矩阵
+### 10.0.15 阶段十二：验证矩阵
 
 | 场景 | 预期 |
 |---|---:|
@@ -6062,7 +6665,7 @@ exp   过期时间
 | ADMIN token 删除用户 | 204 |
 | token 过期或签名错误 | 401 |
 
-### 10.0.14 为什么本任务拆成这些阶段？
+### 10.0.16 为什么本任务拆成这些阶段？
 
 认证错误通常来自不同层：数据库列、Bean 注入、密码校验、JWT 签名、JWT 解析、角色映射或 URL 规则。如果一次写完再运行，错误会叠在一起。逐阶段验证能够明确每个问题属于哪一层。
 
@@ -6239,12 +6842,12 @@ JWT 签名密钥必须使用环境变量或密钥管理服务，不提交到 Git
 
 ```bash
 # 不携带 token，预期 401
-curl -i http://localhost:8080/api/users
+curl -i http://localhost:8081/api/users
 
 # 携带有效 token
 curl -i \
   -H "Authorization: Bearer $ACCESS_TOKEN" \
-  http://localhost:8080/api/users
+  http://localhost:8081/api/users
 ```
 
 401 表示未认证或 token 无效；403 表示已认证，但权限不足。

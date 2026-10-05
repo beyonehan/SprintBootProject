@@ -68,4 +68,20 @@ public class GlobalExceptionHandler {
                 Map.of("email", exception.getMessage())
         );
     }
+
+    @ExceptionHandler(InvalidCredentialsException.class)
+    @ResponseStatus(HttpStatus.UNAUTHORIZED)
+    public ApiError handleInvalidCredentials(
+            InvalidCredentialsException exception,
+            HttpServletRequest request
+    ) {
+        return new ApiError(
+                Instant.now(),
+                HttpStatus.UNAUTHORIZED.value(),
+                HttpStatus.UNAUTHORIZED.getReasonPhrase(),
+                exception.getMessage(),
+                request.getRequestURI(),
+                Map.of()
+        );
+    }
 }

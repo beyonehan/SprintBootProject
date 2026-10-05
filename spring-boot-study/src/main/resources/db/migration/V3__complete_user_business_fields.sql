@@ -1,0 +1,11 @@
+UPDATE app_users
+SET email = CONCAT('legacy-', id, '@example.invalid')
+WHERE email IS NULL OR TRIM(email) = '';
+
+ALTER TABLE app_users
+    MODIFY COLUMN email VARCHAR(255) NOT NULL,
+    ADD COLUMN status VARCHAR(20) NOT NULL DEFAULT 'ACTIVE',
+    ADD COLUMN created_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6),
+    ADD COLUMN updated_at DATETIME(6) NOT NULL DEFAULT CURRENT_TIMESTAMP(6)
+        ON UPDATE CURRENT_TIMESTAMP(6),
+    ADD CONSTRAINT uk_app_users_email UNIQUE (email);
